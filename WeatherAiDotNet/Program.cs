@@ -3,7 +3,6 @@ using WeatherAiDotNet.Models;
 using WeatherAiDotNet.Services;
 
 var appOptions = AppOptions.FromArgs(args);
-var effectiveEmbeddingCliPath = appOptions.LlamaEmbeddingCliPath;
 var effectiveOcrCliPath = appOptions.OcrCliPath;
 
 if (!Directory.Exists(appOptions.PdfFolderPath))
@@ -24,30 +23,8 @@ if (!File.Exists(appOptions.EmbeddingModelPath))
     return;
 }
 
-var llamaCliCheck = await CliToolService.ValidateAsync(appOptions.LlamaCliPath, "--help");
-if (!llamaCliCheck.Success)
-{
-    Console.WriteLine($"Unable to run llama CLI: {appOptions.LlamaCliPath}");
-    Console.WriteLine(llamaCliCheck.Message);
-    return;
-}
-
-var embeddingCliCheck = await CliToolService.ValidateAsync(appOptions.LlamaEmbeddingCliPath, "--help");
-if (!embeddingCliCheck.Success)
-{
-    Console.WriteLine($"llama embedding CLI not available: {appOptions.LlamaEmbeddingCliPath}");
-    Console.WriteLine("Falling back to llama-cli for embeddings.");
-
-    var fallbackCheck = await CliToolService.ValidateAsync(appOptions.LlamaCliPath, "--help");
-    if (!fallbackCheck.Success)
-    {
-        Console.WriteLine($"Unable to run fallback embedding CLI: {appOptions.LlamaCliPath}");
-        Console.WriteLine(fallbackCheck.Message);
-        return;
-    }
-
-    effectiveEmbeddingCliPath = appOptions.LlamaCliPath;
-}
+Console.WriteLine($"Using LLamaSharp with {appOptions.LlamaBackend} backend preference on this Intel CPU/GPU setup.");
+Console.WriteLine("Initializing LLamaSharp...");
 
 if (!string.IsNullOrWhiteSpace(appOptions.OcrCliPath))
 {
@@ -83,23 +60,28 @@ Console.WriteLine($"Found {pdfFiles.Count} PDF files.");
 Console.WriteLine("Preparing embedding model...");
 
 var embeddingProbe = await EmbeddingService.ProbeAsync(
-    effectiveEmbeddingCliPath,
     appOptions.EmbeddingModelPath,
+    appOptions.LlamaBackend,
+    appOptions.PreferGpu,
     appOptions.GpuLayers,
     appOptions.ContextSize);
 
 var useModelEmbeddings = embeddingProbe.Vector is { Length: > 0 };
 if (!useModelEmbeddings)
 {
-    Console.WriteLine("Could not generate embeddings from the local embedding model/tool. Using hash embeddings for this run.");
+    Console.WriteLine("LLamaSharp runtime: unavailable for embeddings, falling back to local CPU hash embeddings.");
+    Console.WriteLine("Could not generate embeddings from LLamaSharp. Using hash embeddings for this run.");
     if (!string.IsNullOrWhiteSpace(embeddingProbe.Diagnostic))
     {
         Console.WriteLine($"Embedding diagnostic: {embeddingProbe.Diagnostic}");
     }
-
-    if (string.Equals(effectiveEmbeddingCliPath, appOptions.LlamaCliPath, StringComparison.OrdinalIgnoreCase))
+}
+else
+{
+    Console.WriteLine($"LLamaSharp runtime: {EmbeddingService.GetRuntimeBackend()}.");
+    if (!string.IsNullOrWhiteSpace(embeddingProbe.Diagnostic))
     {
-        Console.WriteLine("Note: this llama-cli build does not expose embedding output. Install a llama.cpp build that includes llama-embedding.exe for semantic embeddings.");
+        Console.WriteLine(embeddingProbe.Diagnostic);
     }
 }
 
@@ -145,8 +127,9 @@ foreach (var file in pdfFiles)
             chunk,
             effectiveEmbeddingSize,
             useModelEmbeddings,
-            effectiveEmbeddingCliPath,
             appOptions.EmbeddingModelPath,
+            appOptions.LlamaBackend,
+            appOptions.PreferGpu,
             appOptions.GpuLayers,
             appOptions.ContextSize);
 
@@ -164,8 +147,9 @@ foreach (var file in pdfFiles)
                 imageItem.IndexText,
                 effectiveEmbeddingSize,
                 useModelEmbeddings,
-                effectiveEmbeddingCliPath,
                 appOptions.EmbeddingModelPath,
+                appOptions.LlamaBackend,
+                appOptions.PreferGpu,
                 appOptions.GpuLayers,
                 appOptions.ContextSize);
 
@@ -222,8 +206,9 @@ while (true)
         question,
         effectiveEmbeddingSize,
         useModelEmbeddings,
-        effectiveEmbeddingCliPath,
         appOptions.EmbeddingModelPath,
+        appOptions.LlamaBackend,
+        appOptions.PreferGpu,
         appOptions.GpuLayers,
         appOptions.ContextSize);
 
@@ -257,10 +242,11 @@ while (true)
     """;
 
     var answer = await LlamaGenerationService.GenerateAnswerAsync(
-        appOptions.LlamaCliPath,
         appOptions.ModelPath,
         prompt,
         maxTokens: 400,
+        appOptions.LlamaBackend,
+        appOptions.PreferGpu,
         appOptions.GpuLayers,
         appOptions.ContextSize);
 

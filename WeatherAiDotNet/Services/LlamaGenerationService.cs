@@ -1,81 +1,98 @@
-using System.Diagnostics;
 using System.Text;
+using LLama;
+using LLama.Common;
+using LLama.Sampling;
 
 namespace WeatherAiDotNet.Services;
 
 internal static class LlamaGenerationService
 {
-    public static async Task<string> GenerateAnswerAsync(string llamaCliPath, string modelPath, string prompt, int maxTokens, int gpuLayers, int contextSize)
-    {
-        var promptFilePath = Path.Combine(Path.GetTempPath(), $"rag-prompt-{Guid.NewGuid():N}.txt");
-        await File.WriteAllTextAsync(promptFilePath, prompt, Encoding.UTF8);
+    private static readonly object SyncRoot = new();
+    private static LLamaWeights? s_weights;
+    private static StatelessExecutor? s_executor;
+    private static string? s_modelPath;
+    private static string? s_backend;
+    private static bool s_preferGpu;
+    private static int s_gpuLayers;
+    private static int s_contextSize;
 
-        var processStartInfo = new ProcessStartInfo
+    public static async Task<string> GenerateAnswerAsync(
+        string modelPath,
+        string prompt,
+        int maxTokens,
+        string backend,
+        bool preferGpu,
+        int gpuLayers,
+        int contextSize)
+    {
+        EnsureInitialized(modelPath, backend, preferGpu, gpuLayers, contextSize);
+
+        var inferenceParams = new InferenceParams
         {
-            FileName = llamaCliPath,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
+            MaxTokens = maxTokens,
+            AntiPrompts = ["\nQuestion:", "\nUser:", "<|im_end|>"],
+            SamplingPipeline = new DefaultSamplingPipeline()
         };
 
-        processStartInfo.ArgumentList.Add("-m");
-        processStartInfo.ArgumentList.Add(modelPath);
-        processStartInfo.ArgumentList.Add("-ngl");
-        processStartInfo.ArgumentList.Add(Math.Max(0, gpuLayers).ToString());
-        processStartInfo.ArgumentList.Add("-c");
-        processStartInfo.ArgumentList.Add(Math.Max(512, contextSize).ToString());
-        processStartInfo.ArgumentList.Add("-n");
-        processStartInfo.ArgumentList.Add(maxTokens.ToString());
-        processStartInfo.ArgumentList.Add("--no-display-prompt");
-        processStartInfo.ArgumentList.Add("-f");
-        processStartInfo.ArgumentList.Add(promptFilePath);
-        processStartInfo.ArgumentList.Add("--simple-io");
-        processStartInfo.ArgumentList.Add("--log-disable");
-
-        using var process = new Process { StartInfo = processStartInfo };
-
-        try
+        var response = new StringBuilder();
+        await foreach (var text in s_executor!.InferAsync(prompt, inferenceParams))
         {
-            process.Start();
-        }
-        catch (Exception ex)
-        {
-            TryDelete(promptFilePath);
-            return $"Unable to start llama.cpp CLI. Configure --llama-cli correctly. Error: {ex.Message}";
+            response.Append(text);
         }
 
-        var outputTask = process.StandardOutput.ReadToEndAsync();
-        var errorTask = process.StandardError.ReadToEndAsync();
-
-        await process.WaitForExitAsync();
-
-        var output = await outputTask;
-        var error = await errorTask;
-
-        TryDelete(promptFilePath);
-
-        if (process.ExitCode != 0)
-        {
-            return $"llama.cpp CLI failed (exit code {process.ExitCode}).\nSTDERR:\n{error}\nSTDOUT:\n{output}";
-        }
-
-        return string.IsNullOrWhiteSpace(output)
+        return response.Length == 0
             ? "No response returned by local model."
-            : output.Trim();
+            : response.ToString().Trim();
     }
 
-    private static void TryDelete(string filePath)
+    private static void EnsureInitialized(string modelPath, string backend, bool preferGpu, int gpuLayers, int contextSize)
     {
-        try
+        lock (SyncRoot)
         {
-            if (File.Exists(filePath))
+            if (s_executor is not null
+                && string.Equals(s_modelPath, modelPath, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(s_backend, backend, StringComparison.OrdinalIgnoreCase)
+                && s_preferGpu == preferGpu
+                && s_gpuLayers == gpuLayers
+                && s_contextSize == contextSize)
             {
-                File.Delete(filePath);
+                return;
             }
+
+            DisposeCurrent();
+            LlamaNativeService.Configure(backend, preferGpu);
+
+            try
+            {
+                var modelParams = LlamaNativeService.CreateGenerationModelParams(modelPath, gpuLayers, contextSize);
+                s_weights = LLamaWeights.LoadFromFile(modelParams);
+                s_executor = new StatelessExecutor(s_weights, modelParams, logger: null);
+            }
+            catch when (preferGpu && gpuLayers > 0)
+            {
+                var cpuParams = LlamaNativeService.CreateGenerationModelParams(modelPath, 0, contextSize);
+                s_weights = LLamaWeights.LoadFromFile(cpuParams);
+                s_executor = new StatelessExecutor(s_weights, cpuParams, logger: null);
+            }
+
+            s_modelPath = modelPath;
+            s_backend = backend;
+            s_preferGpu = preferGpu;
+            s_gpuLayers = gpuLayers;
+            s_contextSize = contextSize;
         }
-        catch
-        {
-        }
+    }
+
+    private static void DisposeCurrent()
+    {
+        s_executor?.Context.Dispose();
+        s_weights?.Dispose();
+        s_executor = null;
+        s_weights = null;
+        s_modelPath = null;
+        s_backend = null;
+        s_preferGpu = false;
+        s_gpuLayers = 0;
+        s_contextSize = 0;
     }
 }

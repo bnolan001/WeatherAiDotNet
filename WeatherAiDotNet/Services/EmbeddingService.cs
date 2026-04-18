@@ -1,27 +1,41 @@
-using System.Diagnostics;
-using System.Globalization;
 using System.Text;
-using System.Text.Json;
+using LLama;
 using WeatherAiDotNet.Models;
 
 namespace WeatherAiDotNet.Services;
 
 internal static class EmbeddingService
 {
+    private static readonly object SyncRoot = new();
+    private static LLamaWeights? s_weights;
+    private static LLamaEmbedder? s_embedder;
+    private static string? s_modelPath;
+    private static string? s_backend;
+    private static bool s_preferGpu;
+    private static int s_gpuLayers;
+    private static int s_contextSize;
+    private static string? s_initializationDiagnostic;
+    private static string s_runtimeBackend = "unknown";
+
+    public static string GetRuntimeBackend()
+        => s_runtimeBackend;
+
     public static async Task<float[]> GetEmbeddingAsync(
         string input,
         int fallbackEmbeddingSize,
         bool useModelEmbeddings,
-        string llamaEmbeddingCliPath,
         string embeddingModelPath,
+        string backend,
+        bool preferGpu,
         int gpuLayers,
         int contextSize)
     {
         if (useModelEmbeddings)
         {
-            var vector = await GenerateEmbeddingWithLlamaCppAsync(
-                llamaEmbeddingCliPath,
+            var vector = await GenerateEmbeddingWithLlamaSharpAsync(
                 embeddingModelPath,
+                backend,
+                preferGpu,
                 input,
                 gpuLayers,
                 contextSize);
@@ -37,27 +51,31 @@ internal static class EmbeddingService
     }
 
     public static async Task<EmbeddingProbeResult> ProbeAsync(
-        string llamaEmbeddingCliPath,
         string embeddingModelPath,
+        string backend,
+        bool preferGpu,
         int gpuLayers,
         int contextSize)
         => await TryGenerateEmbeddingWithDiagnosticsAsync(
-            llamaEmbeddingCliPath,
             embeddingModelPath,
+            backend,
+            preferGpu,
             "embedding calibration",
             gpuLayers,
             contextSize);
 
-    private static async Task<float[]?> GenerateEmbeddingWithLlamaCppAsync(
-        string llamaEmbeddingCliPath,
+    private static async Task<float[]?> GenerateEmbeddingWithLlamaSharpAsync(
         string embeddingModelPath,
+        string backend,
+        bool preferGpu,
         string input,
         int gpuLayers,
         int contextSize)
     {
         var result = await TryGenerateEmbeddingWithDiagnosticsAsync(
-            llamaEmbeddingCliPath,
             embeddingModelPath,
+            backend,
+            preferGpu,
             input,
             gpuLayers,
             contextSize);
@@ -66,199 +84,118 @@ internal static class EmbeddingService
     }
 
     private static async Task<EmbeddingProbeResult> TryGenerateEmbeddingWithDiagnosticsAsync(
-        string llamaEmbeddingCliPath,
         string embeddingModelPath,
+        string backend,
+        bool preferGpu,
         string input,
         int gpuLayers,
         int contextSize)
     {
-        var promptFilePath = Path.Combine(Path.GetTempPath(), $"rag-embed-{Guid.NewGuid():N}.txt");
-        await File.WriteAllTextAsync(promptFilePath, input, Encoding.UTF8);
-
-        var profiles = new List<string[]>
-        {
-            new[] { "--embd-normalize", "2", "--embd-output-format", "json", "--log-disable" },
-            new[] { "--embd-output-format", "json", "--log-disable" },
-            new[] { "--log-disable" },
-            Array.Empty<string>()
-        };
-
-        string? lastDiagnostic = null;
-
         try
         {
-            foreach (var profile in profiles)
+            if (!TryEnsureInitialized(embeddingModelPath, backend, preferGpu, gpuLayers, contextSize, out var diagnostic))
             {
-                var startInfo = new ProcessStartInfo
-                {
-                    FileName = llamaEmbeddingCliPath,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                };
-
-                startInfo.ArgumentList.Add("-m");
-                startInfo.ArgumentList.Add(embeddingModelPath);
-                startInfo.ArgumentList.Add("-ngl");
-                startInfo.ArgumentList.Add(Math.Max(0, gpuLayers).ToString());
-                startInfo.ArgumentList.Add("-c");
-                startInfo.ArgumentList.Add(Math.Max(512, contextSize).ToString());
-                startInfo.ArgumentList.Add("-f");
-                startInfo.ArgumentList.Add(promptFilePath);
-
-                foreach (var arg in profile)
-                {
-                    startInfo.ArgumentList.Add(arg);
-                }
-
-                using var process = new Process { StartInfo = startInfo };
-
-                try
-                {
-                    process.Start();
-                }
-                catch (Exception ex)
-                {
-                    return new EmbeddingProbeResult(null, ex.Message);
-                }
-
-                var outputTask = process.StandardOutput.ReadToEndAsync();
-                var errorTask = process.StandardError.ReadToEndAsync();
-                await process.WaitForExitAsync();
-
-                var output = await outputTask;
-                var error = await errorTask;
-
-                if (process.ExitCode != 0)
-                {
-                    lastDiagnostic = string.IsNullOrWhiteSpace(error)
-                        ? $"Embedding process exited with code {process.ExitCode}."
-                        : error.Trim();
-                    continue;
-                }
-
-                if (string.IsNullOrWhiteSpace(output))
-                {
-                    lastDiagnostic = "Embedding process returned no output.";
-                    continue;
-                }
-
-                var vector = TryParseEmbeddingVector(output);
-                if (vector is { Length: > 0 })
-                {
-                    return new EmbeddingProbeResult(vector, null);
-                }
-
-                lastDiagnostic = "Embedding output could not be parsed.";
+                return new EmbeddingProbeResult(null, diagnostic);
             }
-        }
-        finally
-        {
-            TryDelete(promptFilePath);
-        }
 
-        return new EmbeddingProbeResult(null, lastDiagnostic ?? "Unknown embedding error.");
+            var embeddings = await s_embedder!.GetEmbeddings(input, CancellationToken.None);
+            var vector = embeddings.FirstOrDefault();
+
+            if (vector is { Length: > 0 })
+            {
+                return new EmbeddingProbeResult(vector, s_initializationDiagnostic);
+            }
+
+            return new EmbeddingProbeResult(null, CombineDiagnostic(s_initializationDiagnostic, "Embedding model returned no vectors."));
+        }
+        catch (Exception ex)
+        {
+            return new EmbeddingProbeResult(null, CombineDiagnostic(s_initializationDiagnostic, ex.Message));
+        }
     }
 
-    private static float[]? TryParseEmbeddingVector(string output)
+    private static bool TryEnsureInitialized(
+        string embeddingModelPath,
+        string backend,
+        bool preferGpu,
+        int gpuLayers,
+        int contextSize,
+        out string? diagnostic)
     {
-        try
+        lock (SyncRoot)
         {
-            using var document = JsonDocument.Parse(output);
-            var parsed = TryParseEmbeddingVectorFromElement(document.RootElement);
-            if (parsed is { Length: > 0 })
+            if (s_embedder is not null
+                && string.Equals(s_modelPath, embeddingModelPath, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(s_backend, backend, StringComparison.OrdinalIgnoreCase)
+                && s_preferGpu == preferGpu
+                && s_gpuLayers == gpuLayers
+                && s_contextSize == contextSize)
             {
-                return parsed;
+                diagnostic = s_initializationDiagnostic;
+                return true;
             }
-        }
-        catch
-        {
-        }
 
-        var start = output.IndexOf('[');
-        var end = output.LastIndexOf(']');
+            DisposeCurrent();
+            LlamaNativeService.Configure(backend, preferGpu);
 
-        if (start >= 0 && end > start)
-        {
-            var jsonSlice = output[start..(end + 1)];
             try
             {
-                using var document = JsonDocument.Parse(jsonSlice);
-                var parsed = TryParseEmbeddingVectorFromElement(document.RootElement);
-                if (parsed is { Length: > 0 })
+                var modelParams = LlamaNativeService.CreateEmbeddingModelParams(embeddingModelPath, gpuLayers, contextSize);
+                s_weights = LLamaWeights.LoadFromFile(modelParams);
+                s_embedder = new LLamaEmbedder(s_weights, modelParams, logger: null);
+                s_initializationDiagnostic = null;
+                s_runtimeBackend = LlamaNativeService.GetRequestedRuntimeBackend(backend, preferGpu, gpuLayers);
+            }
+            catch (Exception gpuEx) when (preferGpu && gpuLayers > 0)
+            {
+                try
                 {
-                    return parsed;
+                    var cpuParams = LlamaNativeService.CreateEmbeddingModelParams(embeddingModelPath, 0, contextSize);
+                    s_weights = LLamaWeights.LoadFromFile(cpuParams);
+                    s_embedder = new LLamaEmbedder(s_weights, cpuParams, logger: null);
+                    s_initializationDiagnostic = $"Embedding model could not start on the Intel/Vulkan path and was moved to CPU-only mode. {gpuEx.Message}";
+                    s_runtimeBackend = "cpu";
+                }
+                catch (Exception cpuEx)
+                {
+                    diagnostic = CombineDiagnostic(gpuEx.Message, cpuEx.Message);
+                    return false;
                 }
             }
-            catch
-            {
-            }
-        }
 
-        return TryParseEmbeddingVectorFromPlainText(output);
+            s_modelPath = embeddingModelPath;
+            s_backend = backend;
+            s_preferGpu = preferGpu;
+            s_gpuLayers = gpuLayers;
+            s_contextSize = contextSize;
+            diagnostic = s_initializationDiagnostic;
+            return true;
+        }
     }
 
-    private static float[]? TryParseEmbeddingVectorFromPlainText(string output)
+    private static void DisposeCurrent()
     {
-        var separators = new[] { ' ', '\t', '\r', '\n', ',', ';', '[', ']' };
-        var values = new List<float>();
-
-        foreach (var token in output.Split(separators, StringSplitOptions.RemoveEmptyEntries))
-        {
-            if (float.TryParse(token, NumberStyles.Float, CultureInfo.InvariantCulture, out var value))
-            {
-                values.Add(value);
-            }
-        }
-
-        return values.Count >= 32 ? values.ToArray() : null;
+        s_embedder?.Dispose();
+        s_weights?.Dispose();
+        s_embedder = null;
+        s_weights = null;
+        s_modelPath = null;
+        s_backend = null;
+        s_preferGpu = false;
+        s_gpuLayers = 0;
+        s_contextSize = 0;
+        s_initializationDiagnostic = null;
+        s_runtimeBackend = "unknown";
     }
 
-    private static float[]? TryParseEmbeddingVectorFromElement(JsonElement element)
+    private static string? CombineDiagnostic(string? first, string? second)
     {
-        if (element.ValueKind == JsonValueKind.Array)
-        {
-            if (element.GetArrayLength() == 0)
-            {
-                return null;
-            }
+        var messages = new[] { first?.Trim(), second?.Trim() }
+            .Where(static message => !string.IsNullOrWhiteSpace(message))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
 
-            var first = element[0];
-            if (first.ValueKind == JsonValueKind.Number)
-            {
-                return element.EnumerateArray().Select(x => x.GetSingle()).ToArray();
-            }
-
-            if (first.ValueKind == JsonValueKind.Array)
-            {
-                return first.EnumerateArray().Select(x => x.GetSingle()).ToArray();
-            }
-        }
-
-        if (element.ValueKind == JsonValueKind.Object)
-        {
-            if (element.TryGetProperty("embedding", out var embedding)
-                && embedding.ValueKind == JsonValueKind.Array)
-            {
-                return embedding.EnumerateArray().Select(x => x.GetSingle()).ToArray();
-            }
-
-            if (element.TryGetProperty("data", out var data)
-                && data.ValueKind == JsonValueKind.Array
-                && data.GetArrayLength() > 0)
-            {
-                var firstItem = data[0];
-                if (firstItem.ValueKind == JsonValueKind.Object
-                    && firstItem.TryGetProperty("embedding", out var itemEmbedding)
-                    && itemEmbedding.ValueKind == JsonValueKind.Array)
-                {
-                    return itemEmbedding.EnumerateArray().Select(x => x.GetSingle()).ToArray();
-                }
-            }
-        }
-
-        return null;
+        return messages.Length == 0 ? null : string.Join(" ", messages);
     }
 
     private static float[] CreateLocalEmbedding(string input, int size)
@@ -343,20 +280,6 @@ internal static class EmbeddingService
         for (var i = 0; i < vector.Length; i++)
         {
             vector[i] /= norm;
-        }
-    }
-
-    private static void TryDelete(string filePath)
-    {
-        try
-        {
-            if (File.Exists(filePath))
-            {
-                File.Delete(filePath);
-            }
-        }
-        catch
-        {
         }
     }
 }

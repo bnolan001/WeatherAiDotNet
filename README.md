@@ -25,5 +25,5 @@ Once the build has completed, you will find your executable files usually in:
 .\build\bin\Release\
 # Testing
 ```bash
-dotnet run --project WeatherAiDotNet -- --gpu-layers 0 --ctx-size 16384 --top-k 6 --retrieval-pool 24H
+dotnet run --project WeatherAiDotNet -- --gpu-layers 0 --ctx-size 16384 --top-k 6 --retrieval-pool 24
 ```
