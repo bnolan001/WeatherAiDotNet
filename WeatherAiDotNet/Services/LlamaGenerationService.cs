@@ -2,6 +2,7 @@ using System.Text;
 using LLama;
 using LLama.Common;
 using LLama.Sampling;
+using WeatherAiDotNet.Models;
 
 namespace WeatherAiDotNet.Services;
 
@@ -15,6 +16,40 @@ internal static class LlamaGenerationService
     private static bool s_preferGpu;
     private static int s_gpuLayers;
     private static int s_contextSize;
+    private static int s_threads;
+    private static int s_batchThreads;
+    private static int s_batchSize;
+    private static int s_uBatchSize;
+    private static string? s_initializationDiagnostic;
+    private static string s_runtimeBackend = "unknown";
+
+    public static string GetRuntimeBackend()
+        => s_runtimeBackend;
+
+    public static string? GetInitializationDiagnostic()
+        => s_initializationDiagnostic;
+
+    public static Task<ToolCheckResult> ProbeAsync(
+        string modelPath,
+        string backend,
+        bool preferGpu,
+        int gpuLayers,
+        int contextSize,
+        int threads,
+        int batchThreads,
+        int batchSize,
+        int uBatchSize)
+    {
+        try
+        {
+            EnsureInitialized(modelPath, backend, preferGpu, gpuLayers, contextSize, threads, batchThreads, batchSize, uBatchSize);
+            return Task.FromResult(new ToolCheckResult(true, s_initializationDiagnostic ?? string.Empty));
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult(new ToolCheckResult(false, ex.Message));
+        }
+    }
 
     public static async Task<string> GenerateAnswerAsync(
         string modelPath,
@@ -23,9 +58,13 @@ internal static class LlamaGenerationService
         string backend,
         bool preferGpu,
         int gpuLayers,
-        int contextSize)
+        int contextSize,
+        int threads,
+        int batchThreads,
+        int batchSize,
+        int uBatchSize)
     {
-        EnsureInitialized(modelPath, backend, preferGpu, gpuLayers, contextSize);
+        EnsureInitialized(modelPath, backend, preferGpu, gpuLayers, contextSize, threads, batchThreads, batchSize, uBatchSize);
 
         var inferenceParams = new InferenceParams
         {
@@ -45,7 +84,16 @@ internal static class LlamaGenerationService
             : response.ToString().Trim();
     }
 
-    private static void EnsureInitialized(string modelPath, string backend, bool preferGpu, int gpuLayers, int contextSize)
+    private static void EnsureInitialized(
+        string modelPath,
+        string backend,
+        bool preferGpu,
+        int gpuLayers,
+        int contextSize,
+        int threads,
+        int batchThreads,
+        int batchSize,
+        int uBatchSize)
     {
         lock (SyncRoot)
         {
@@ -54,7 +102,11 @@ internal static class LlamaGenerationService
                 && string.Equals(s_backend, backend, StringComparison.OrdinalIgnoreCase)
                 && s_preferGpu == preferGpu
                 && s_gpuLayers == gpuLayers
-                && s_contextSize == contextSize)
+                && s_contextSize == contextSize
+                && s_threads == threads
+                && s_batchThreads == batchThreads
+                && s_batchSize == batchSize
+                && s_uBatchSize == uBatchSize)
             {
                 return;
             }
@@ -64,15 +116,19 @@ internal static class LlamaGenerationService
 
             try
             {
-                var modelParams = LlamaNativeService.CreateGenerationModelParams(modelPath, gpuLayers, contextSize);
+                var modelParams = LlamaNativeService.CreateGenerationModelParams(modelPath, gpuLayers, contextSize, threads, batchThreads, batchSize, uBatchSize);
                 s_weights = LLamaWeights.LoadFromFile(modelParams);
                 s_executor = new StatelessExecutor(s_weights, modelParams, logger: null);
+                s_initializationDiagnostic = null;
+                s_runtimeBackend = LlamaNativeService.GetRequestedRuntimeBackend(backend, preferGpu, gpuLayers);
             }
-            catch when (preferGpu && gpuLayers > 0)
+            catch (Exception gpuEx) when (preferGpu && gpuLayers > 0)
             {
-                var cpuParams = LlamaNativeService.CreateGenerationModelParams(modelPath, 0, contextSize);
+                var cpuParams = LlamaNativeService.CreateGenerationModelParams(modelPath, 0, contextSize, threads, batchThreads, batchSize, uBatchSize);
                 s_weights = LLamaWeights.LoadFromFile(cpuParams);
                 s_executor = new StatelessExecutor(s_weights, cpuParams, logger: null);
+                s_initializationDiagnostic = $"Generation model could not start on the Intel/Vulkan path and was moved to CPU-only mode. {gpuEx.Message}";
+                s_runtimeBackend = "cpu";
             }
 
             s_modelPath = modelPath;
@@ -80,6 +136,10 @@ internal static class LlamaGenerationService
             s_preferGpu = preferGpu;
             s_gpuLayers = gpuLayers;
             s_contextSize = contextSize;
+            s_threads = threads;
+            s_batchThreads = batchThreads;
+            s_batchSize = batchSize;
+            s_uBatchSize = uBatchSize;
         }
     }
 
@@ -94,5 +154,11 @@ internal static class LlamaGenerationService
         s_preferGpu = false;
         s_gpuLayers = 0;
         s_contextSize = 0;
+        s_threads = 0;
+        s_batchThreads = 0;
+        s_batchSize = 0;
+        s_uBatchSize = 0;
+        s_initializationDiagnostic = null;
+        s_runtimeBackend = "unknown";
     }
 }

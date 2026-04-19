@@ -23,7 +23,8 @@ if (!File.Exists(appOptions.EmbeddingModelPath))
     return;
 }
 
-Console.WriteLine($"Using LLamaSharp with {appOptions.LlamaBackend} backend preference on this Intel CPU/GPU setup.");
+Console.WriteLine($"Using LLamaSharp with {appOptions.LlamaBackend} backend preference on this Intel Arc 140V + Intel AI Boost system.");
+Console.WriteLine($"LLamaSharp tuning: gpu-layers={appOptions.GpuLayers}, threads={appOptions.Threads}, batch-threads={appOptions.BatchThreads}, batch-size={appOptions.BatchSize}, ubatch-size={appOptions.UBatchSize}.");
 Console.WriteLine("Initializing LLamaSharp...");
 
 if (!string.IsNullOrWhiteSpace(appOptions.OcrCliPath))
@@ -64,12 +65,27 @@ var embeddingProbe = await EmbeddingService.ProbeAsync(
     appOptions.LlamaBackend,
     appOptions.PreferGpu,
     appOptions.GpuLayers,
-    appOptions.ContextSize);
+    appOptions.ContextSize,
+    appOptions.Threads,
+    appOptions.BatchThreads,
+    appOptions.BatchSize,
+    appOptions.UBatchSize);
+
+var generationProbe = await LlamaGenerationService.ProbeAsync(
+    appOptions.ModelPath,
+    appOptions.LlamaBackend,
+    appOptions.PreferGpu,
+    appOptions.GpuLayers,
+    appOptions.ContextSize,
+    appOptions.Threads,
+    appOptions.BatchThreads,
+    appOptions.BatchSize,
+    appOptions.UBatchSize);
 
 var useModelEmbeddings = embeddingProbe.Vector is { Length: > 0 };
 if (!useModelEmbeddings)
 {
-    Console.WriteLine("LLamaSharp runtime: unavailable for embeddings, falling back to local CPU hash embeddings.");
+    Console.WriteLine("Embedding runtime: unavailable for LLamaSharp, falling back to local CPU hash embeddings.");
     Console.WriteLine("Could not generate embeddings from LLamaSharp. Using hash embeddings for this run.");
     if (!string.IsNullOrWhiteSpace(embeddingProbe.Diagnostic))
     {
@@ -78,12 +94,29 @@ if (!useModelEmbeddings)
 }
 else
 {
-    Console.WriteLine($"LLamaSharp runtime: {EmbeddingService.GetRuntimeBackend()}.");
+    Console.WriteLine($"Embedding runtime: {EmbeddingService.GetRuntimeBackend()}.");
     if (!string.IsNullOrWhiteSpace(embeddingProbe.Diagnostic))
     {
         Console.WriteLine(embeddingProbe.Diagnostic);
     }
 }
+
+if (generationProbe.Success)
+{
+    Console.WriteLine($"Generation runtime: {LlamaGenerationService.GetRuntimeBackend()}.");
+    if (!string.IsNullOrWhiteSpace(generationProbe.Message))
+    {
+        Console.WriteLine(generationProbe.Message);
+    }
+}
+else
+{
+    Console.WriteLine("Generation runtime: unavailable.");
+    Console.WriteLine(generationProbe.Message);
+    return;
+}
+
+Console.WriteLine("Intel AI Boost NPU detected, but the current LLamaSharp/llama.cpp stack in this project can use Vulkan GPU acceleration, not the NPU.");
 
 var effectiveEmbeddingSize = useModelEmbeddings ? embeddingProbe.Vector!.Length : appOptions.EmbeddingSize;
 var reindexedDocuments = 0;
@@ -131,7 +164,11 @@ foreach (var file in pdfFiles)
             appOptions.LlamaBackend,
             appOptions.PreferGpu,
             appOptions.GpuLayers,
-            appOptions.ContextSize);
+            appOptions.ContextSize,
+            appOptions.Threads,
+            appOptions.BatchThreads,
+            appOptions.BatchSize,
+            appOptions.UBatchSize);
 
         fileVectors.Add(new StoredVector(appOptions.CollectionName, relativePdfPath, chunkIndex++, chunk, vector));
     }
@@ -151,7 +188,11 @@ foreach (var file in pdfFiles)
                 appOptions.LlamaBackend,
                 appOptions.PreferGpu,
                 appOptions.GpuLayers,
-                appOptions.ContextSize);
+                appOptions.ContextSize,
+                appOptions.Threads,
+                appOptions.BatchThreads,
+                appOptions.BatchSize,
+                appOptions.UBatchSize);
 
             fileVectors.Add(new StoredVector(appOptions.CollectionName, relativePdfPath, chunkIndex++, imageItem.IndexText, vector));
         }
@@ -210,7 +251,11 @@ while (true)
         appOptions.LlamaBackend,
         appOptions.PreferGpu,
         appOptions.GpuLayers,
-        appOptions.ContextSize);
+        appOptions.ContextSize,
+        appOptions.Threads,
+        appOptions.BatchThreads,
+        appOptions.BatchSize,
+        appOptions.UBatchSize);
 
     var matches = VectorStoreService.Search(
         appOptions.DbPath,
@@ -248,7 +293,11 @@ while (true)
         appOptions.LlamaBackend,
         appOptions.PreferGpu,
         appOptions.GpuLayers,
-        appOptions.ContextSize);
+        appOptions.ContextSize,
+        appOptions.Threads,
+        appOptions.BatchThreads,
+        appOptions.BatchSize,
+        appOptions.UBatchSize);
 
     Console.WriteLine();
     Console.WriteLine(answer);

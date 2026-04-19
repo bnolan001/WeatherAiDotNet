@@ -34,18 +34,26 @@ internal static class LlamaNativeService
                 ? "vulkan"
                 : "cpu";
 
-    public static ModelParams CreateGenerationModelParams(string modelPath, int gpuLayers, int contextSize)
+    public static ModelParams CreateGenerationModelParams(string modelPath, int gpuLayers, int contextSize, int threads, int batchThreads, int batchSize, int uBatchSize)
         => new(modelPath)
         {
             ContextSize = (uint)Math.Max(512, contextSize),
-            GpuLayerCount = gpuLayers > 0 ? gpuLayers : 0
+            GpuLayerCount = Math.Max(0, gpuLayers),
+            Threads = Math.Max(1, threads),
+            BatchThreads = Math.Max(1, batchThreads),
+            BatchSize = (uint)Math.Max(32, batchSize),
+            UBatchSize = (uint)Math.Max(32, uBatchSize)
         };
 
-    public static ModelParams CreateEmbeddingModelParams(string modelPath, int gpuLayers, int contextSize)
+    public static ModelParams CreateEmbeddingModelParams(string modelPath, int gpuLayers, int contextSize, int threads, int batchThreads, int batchSize, int uBatchSize)
         => new(modelPath)
         {
             ContextSize = (uint)Math.Max(512, contextSize),
-            GpuLayerCount = gpuLayers > 0 ? gpuLayers : 0,
+            GpuLayerCount = Math.Max(0, gpuLayers),
+            Threads = Math.Max(1, threads),
+            BatchThreads = Math.Max(1, batchThreads),
+            BatchSize = (uint)Math.Max(32, batchSize),
+            UBatchSize = (uint)Math.Max(32, uBatchSize),
             Embeddings = true,
             PoolingType = LLamaPoolingType.Mean
         };

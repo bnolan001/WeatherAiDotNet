@@ -14,6 +14,10 @@ internal static class EmbeddingService
     private static bool s_preferGpu;
     private static int s_gpuLayers;
     private static int s_contextSize;
+    private static int s_threads;
+    private static int s_batchThreads;
+    private static int s_batchSize;
+    private static int s_uBatchSize;
     private static string? s_initializationDiagnostic;
     private static string s_runtimeBackend = "unknown";
 
@@ -28,7 +32,11 @@ internal static class EmbeddingService
         string backend,
         bool preferGpu,
         int gpuLayers,
-        int contextSize)
+        int contextSize,
+        int threads,
+        int batchThreads,
+        int batchSize,
+        int uBatchSize)
     {
         if (useModelEmbeddings)
         {
@@ -38,7 +46,11 @@ internal static class EmbeddingService
                 preferGpu,
                 input,
                 gpuLayers,
-                contextSize);
+                contextSize,
+                threads,
+                batchThreads,
+                batchSize,
+                uBatchSize);
 
             if (vector is { Length: > 0 })
             {
@@ -55,14 +67,22 @@ internal static class EmbeddingService
         string backend,
         bool preferGpu,
         int gpuLayers,
-        int contextSize)
+        int contextSize,
+        int threads,
+        int batchThreads,
+        int batchSize,
+        int uBatchSize)
         => await TryGenerateEmbeddingWithDiagnosticsAsync(
             embeddingModelPath,
             backend,
             preferGpu,
             "embedding calibration",
             gpuLayers,
-            contextSize);
+            contextSize,
+            threads,
+            batchThreads,
+            batchSize,
+            uBatchSize);
 
     private static async Task<float[]?> GenerateEmbeddingWithLlamaSharpAsync(
         string embeddingModelPath,
@@ -70,7 +90,11 @@ internal static class EmbeddingService
         bool preferGpu,
         string input,
         int gpuLayers,
-        int contextSize)
+        int contextSize,
+        int threads,
+        int batchThreads,
+        int batchSize,
+        int uBatchSize)
     {
         var result = await TryGenerateEmbeddingWithDiagnosticsAsync(
             embeddingModelPath,
@@ -78,7 +102,11 @@ internal static class EmbeddingService
             preferGpu,
             input,
             gpuLayers,
-            contextSize);
+            contextSize,
+            threads,
+            batchThreads,
+            batchSize,
+            uBatchSize);
 
         return result.Vector;
     }
@@ -89,11 +117,15 @@ internal static class EmbeddingService
         bool preferGpu,
         string input,
         int gpuLayers,
-        int contextSize)
+        int contextSize,
+        int threads,
+        int batchThreads,
+        int batchSize,
+        int uBatchSize)
     {
         try
         {
-            if (!TryEnsureInitialized(embeddingModelPath, backend, preferGpu, gpuLayers, contextSize, out var diagnostic))
+            if (!TryEnsureInitialized(embeddingModelPath, backend, preferGpu, gpuLayers, contextSize, threads, batchThreads, batchSize, uBatchSize, out var diagnostic))
             {
                 return new EmbeddingProbeResult(null, diagnostic);
             }
@@ -120,6 +152,10 @@ internal static class EmbeddingService
         bool preferGpu,
         int gpuLayers,
         int contextSize,
+        int threads,
+        int batchThreads,
+        int batchSize,
+        int uBatchSize,
         out string? diagnostic)
     {
         lock (SyncRoot)
@@ -129,7 +165,11 @@ internal static class EmbeddingService
                 && string.Equals(s_backend, backend, StringComparison.OrdinalIgnoreCase)
                 && s_preferGpu == preferGpu
                 && s_gpuLayers == gpuLayers
-                && s_contextSize == contextSize)
+                && s_contextSize == contextSize
+                && s_threads == threads
+                && s_batchThreads == batchThreads
+                && s_batchSize == batchSize
+                && s_uBatchSize == uBatchSize)
             {
                 diagnostic = s_initializationDiagnostic;
                 return true;
@@ -140,7 +180,7 @@ internal static class EmbeddingService
 
             try
             {
-                var modelParams = LlamaNativeService.CreateEmbeddingModelParams(embeddingModelPath, gpuLayers, contextSize);
+                var modelParams = LlamaNativeService.CreateEmbeddingModelParams(embeddingModelPath, gpuLayers, contextSize, threads, batchThreads, batchSize, uBatchSize);
                 s_weights = LLamaWeights.LoadFromFile(modelParams);
                 s_embedder = new LLamaEmbedder(s_weights, modelParams, logger: null);
                 s_initializationDiagnostic = null;
@@ -150,7 +190,7 @@ internal static class EmbeddingService
             {
                 try
                 {
-                    var cpuParams = LlamaNativeService.CreateEmbeddingModelParams(embeddingModelPath, 0, contextSize);
+                    var cpuParams = LlamaNativeService.CreateEmbeddingModelParams(embeddingModelPath, 0, contextSize, threads, batchThreads, batchSize, uBatchSize);
                     s_weights = LLamaWeights.LoadFromFile(cpuParams);
                     s_embedder = new LLamaEmbedder(s_weights, cpuParams, logger: null);
                     s_initializationDiagnostic = $"Embedding model could not start on the Intel/Vulkan path and was moved to CPU-only mode. {gpuEx.Message}";
@@ -168,6 +208,10 @@ internal static class EmbeddingService
             s_preferGpu = preferGpu;
             s_gpuLayers = gpuLayers;
             s_contextSize = contextSize;
+            s_threads = threads;
+            s_batchThreads = batchThreads;
+            s_batchSize = batchSize;
+            s_uBatchSize = uBatchSize;
             diagnostic = s_initializationDiagnostic;
             return true;
         }
@@ -184,6 +228,10 @@ internal static class EmbeddingService
         s_preferGpu = false;
         s_gpuLayers = 0;
         s_contextSize = 0;
+        s_threads = 0;
+        s_batchThreads = 0;
+        s_batchSize = 0;
+        s_uBatchSize = 0;
         s_initializationDiagnostic = null;
         s_runtimeBackend = "unknown";
     }
