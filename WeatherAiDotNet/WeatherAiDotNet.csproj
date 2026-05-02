@@ -9,6 +9,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\WeatherAiDotNet.RagIndexing\WeatherAiDotNet.RagIndexing.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
     <None Remove="Data\afh11-203v2.pdf" />
     <None Remove="Data\afh15-101.pdf" />
     <None Remove="Data\afh15-158.pdf" />

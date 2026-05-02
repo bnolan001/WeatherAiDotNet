@@ -28,7 +28,7 @@ using Serilog;
 using Serilog.Extensions.Logging;
 using System.Text.RegularExpressions;
 using WeatherAiDotNet.Configuration;
-using WeatherAiDotNet.Models;
+using WeatherAiDotNet.RagIndexing;
 using WeatherAiDotNet.Services;
 
 // Configure Serilog as the single logging pipeline for the application.
@@ -114,24 +114,11 @@ try
         Directory.CreateDirectory(appOptions.ImagesOutputPath);
     }
 
-    // --- Discover PDF files -------------------------------------------------------
-
-    Log.Information("Reading PDFs...");
-    var pdfFiles = Directory
-        .EnumerateFiles(appOptions.PdfFolderPath, "*.pdf", SearchOption.AllDirectories)
-        .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
-        .ToList();
-
-    if (pdfFiles.Count == 0)
-    {
-        Log.Warning("No PDF files found under: {PdfFolderPath}", appOptions.PdfFolderPath);
-        return;
-    }
+    // --- Discover and index PDF files --------------------------------------------
 
     // Ensure the SQLite database file and tables exist before we start writing.
     VectorStoreService.EnsureDatabase(appOptions.DbPath);
 
-    Log.Information("Found {PdfCount} PDF files.", pdfFiles.Count);
     Log.Information("Preparing embedding model...");
 
     // --- Probe the embedding model ------------------------------------------------
@@ -206,127 +193,59 @@ try
     // length if available; otherwise use the configured fallback size.
     var effectiveEmbeddingSize = useModelEmbeddings ? embeddingProbe.Vector!.Length : appOptions.EmbeddingSize;
 
-    // --- Incremental PDF indexing loop -------------------------------------------
+    // --- Incremental PDF indexing -------------------------------------------------
 
-    var reindexedDocuments = 0;
-    var skippedDocuments = 0;
-    var totalIndexedChunks = 0;
-    var totalImageItems = 0;
+    var indexingSummary = await RagDatabaseIndexer.IndexAsync(
+        appOptions.PdfFolderPath,
+        appOptions.IncludeImages,
+        PdfContentService.ReadPdfText,
+        static text => PdfContentService.ChunkText(text, chunkSize: 1200, overlap: 200),
+        file => PdfContentService
+            .ExtractPdfImageItems(file, appOptions.PdfFolderPath, appOptions.ImagesOutputPath, effectiveOcrCliPath)
+            .Select(static item => new RagImageItem(item.IndexText))
+            .ToList(),
+        chunk => EmbeddingService.GetEmbeddingAsync(
+            chunk,
+            effectiveEmbeddingSize,
+            useModelEmbeddings,
+            appOptions.EmbeddingModelPath,
+            appOptions.LlamaBackend,
+            appOptions.PreferGpu,
+            appOptions.GpuLayers,
+            appOptions.ContextSize,
+            appOptions.Threads,
+            appOptions.BatchThreads,
+            appOptions.BatchSize,
+            appOptions.UBatchSize),
+        (relativePdfPath, fingerprint) =>
+            VectorStoreService.IsDocumentUpToDate(appOptions.DbPath, appOptions.CollectionName, relativePdfPath, fingerprint),
+        (relativePdfPath, fingerprint, vectors) =>
+        {
+            var storedVectors = vectors
+                .Select(v => new WeatherAiDotNet.Models.StoredVector(appOptions.CollectionName, relativePdfPath, v.ChunkIndex, v.Text, v.Vector))
+                .ToList();
 
-    foreach (var file in pdfFiles)
+            VectorStoreService.ReplaceDocumentVectors(
+                appOptions.DbPath,
+                appOptions.CollectionName,
+                relativePdfPath,
+                fingerprint,
+                storedVectors);
+        },
+        message => Log.Information("{Message}", message),
+        (message, ex) => Log.Warning(ex, "{Message}", message));
+
+    Log.Information(
+        "Re-indexed {ReindexedDocuments} PDFs, skipped {SkippedDocuments} unchanged PDFs.",
+        indexingSummary.ReindexedDocuments,
+        indexingSummary.SkippedDocuments);
+
+    if (indexingSummary.ReindexedDocuments > 0)
     {
-        // Use a path relative to the PDF root as the stable document identifier so
-        // moving the root folder doesn't invalidate the database.
-        var relativePdfPath = Path.GetRelativePath(appOptions.PdfFolderPath, file);
-
-        // The fingerprint encodes file size and last-write time; it's fast to compute
-        // and catches both content changes and silent re-saves.
-        var fingerprint = BuildDocumentFingerprint(file);
-
-        // If the stored fingerprint matches, the PDF hasn't changed — skip it.
-        if (VectorStoreService.IsDocumentUpToDate(appOptions.DbPath, appOptions.CollectionName, relativePdfPath, fingerprint))
-        {
-            skippedDocuments++;
-            Log.Information("Skipping unchanged PDF: {RelativePdfPath}", relativePdfPath);
-            continue;
-        }
-
-        Log.Information("Indexing PDF: {RelativePdfPath}", relativePdfPath);
-
-        // Extract plain text from every page of the PDF.
-        string pdfText;
-        try
-        {
-            pdfText = PdfContentService.ReadPdfText(file);
-        }
-        catch (Exception ex)
-        {
-            // Skip unreadable/corrupt PDFs rather than aborting the whole run.
-            Log.Warning(ex, "Skipping unreadable PDF: {PdfPath}", file);
-            continue;
-        }
-
-        var chunkIndex = 0;
-        var fileVectors = new List<StoredVector>();
-
-        // Split the full document text into overlapping word-window chunks.
-        // chunkSize ≈ 1200 characters, overlap ≈ 200 characters keeps context
-        // continuity across chunk boundaries.
-        var chunks = PdfContentService.ChunkText(pdfText, chunkSize: 1200, overlap: 200).ToList();
-        foreach (var chunk in chunks)
-        {
-            // Embed the chunk text to get its position in semantic vector space.
-            var vector = await EmbeddingService.GetEmbeddingAsync(
-                chunk,
-                effectiveEmbeddingSize,
-                useModelEmbeddings,
-                appOptions.EmbeddingModelPath,
-                appOptions.LlamaBackend,
-                appOptions.PreferGpu,
-                appOptions.GpuLayers,
-                appOptions.ContextSize,
-                appOptions.Threads,
-                appOptions.BatchThreads,
-                appOptions.BatchSize,
-                appOptions.UBatchSize);
-
-            fileVectors.Add(new StoredVector(appOptions.CollectionName, relativePdfPath, chunkIndex++, chunk, vector));
-        }
-
-        // Optionally extract and index images embedded in the PDF.
+        Log.Information("Indexed {TotalIndexedChunks} chunks.", indexingSummary.TotalIndexedChunks);
         if (appOptions.IncludeImages)
         {
-            var imageItems = PdfContentService.ExtractPdfImageItems(file, appOptions.PdfFolderPath, appOptions.ImagesOutputPath, effectiveOcrCliPath);
-            totalImageItems += imageItems.Count;
-
-            foreach (var imageItem in imageItems)
-            {
-                // Embed the image's OCR/metadata text so it can be retrieved just
-                // like a regular text chunk.
-                var vector = await EmbeddingService.GetEmbeddingAsync(
-                    imageItem.IndexText,
-                    effectiveEmbeddingSize,
-                    useModelEmbeddings,
-                    appOptions.EmbeddingModelPath,
-                    appOptions.LlamaBackend,
-                    appOptions.PreferGpu,
-                    appOptions.GpuLayers,
-                    appOptions.ContextSize,
-                    appOptions.Threads,
-                    appOptions.BatchThreads,
-                    appOptions.BatchSize,
-                    appOptions.UBatchSize);
-
-                fileVectors.Add(new StoredVector(appOptions.CollectionName, relativePdfPath, chunkIndex++, imageItem.IndexText, vector));
-            }
-        }
-
-        if (fileVectors.Count == 0)
-        {
-            // Nothing to store (empty PDF or no extractable content); move on.
-            continue;
-        }
-
-        // Atomically delete the old vectors for this document and insert the new
-        // ones along with the updated fingerprint.
-        VectorStoreService.ReplaceDocumentVectors(
-            appOptions.DbPath,
-            appOptions.CollectionName,
-            relativePdfPath,
-            fingerprint,
-            fileVectors);
-
-        reindexedDocuments++;
-        totalIndexedChunks += fileVectors.Count;
-    }
-
-    Log.Information("Re-indexed {ReindexedDocuments} PDFs, skipped {SkippedDocuments} unchanged PDFs.", reindexedDocuments, skippedDocuments);
-    if (reindexedDocuments > 0)
-    {
-        Log.Information("Indexed {TotalIndexedChunks} chunks.", totalIndexedChunks);
-        if (appOptions.IncludeImages)
-        {
-            Log.Information("Processed {TotalImageItems} embedded image items.", totalImageItems);
+            Log.Information("Processed {TotalImageItems} embedded image items.", indexingSummary.TotalImageItems);
         }
     }
 
@@ -446,19 +365,4 @@ catch (Exception ex)
 finally
 {
     Log.CloseAndFlush();
-}
-
-// --- Helper functions --------------------------------------------------------
-
-/// <summary>
-/// Builds a cheap fingerprint string for a file so we can detect changes without
-/// reading the file's full content.  The fingerprint is "{bytes}:{ticks}" where
-/// bytes is the file size and ticks is the UTC last-write time in .NET ticks.
-/// This is fast but not cryptographically secure; it's sufficient for an
-/// incremental-indexing skip check.
-/// </summary>
-static string BuildDocumentFingerprint(string filePath)
-{
-    var fileInfo = new FileInfo(filePath);
-    return $"{fileInfo.Length}:{fileInfo.LastWriteTimeUtc.Ticks}";
 }
