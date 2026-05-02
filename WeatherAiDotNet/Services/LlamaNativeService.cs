@@ -1,5 +1,6 @@
 using LLama.Common;
 using LLama.Native;
+using Microsoft.Extensions.Logging;
 
 namespace WeatherAiDotNet.Services;
 
@@ -12,6 +13,11 @@ namespace WeatherAiDotNet.Services;
 /// LLamaSharp must be told which native backend (Vulkan, CUDA, CPU …) to load
 /// before any model is opened; calling <see cref="Configure"/> more than once would
 /// be a no-op due to the internal <c>s_configured</c> guard.
+/// <para>
+/// Call <see cref="ConfigureLogging"/> once at startup (before any call to
+/// <see cref="Configure"/>) to route all llama.cpp native log messages through the
+/// application's Serilog-backed <see cref="ILogger"/> pipeline.
+/// </para>
 /// </remarks>
 public static class LlamaNativeService
 {
@@ -19,6 +25,29 @@ public static class LlamaNativeService
 
     // Ensures Configure() only applies NativeLibraryConfig settings once per process.
     private static bool s_configured;
+
+    // Holds the ILogger supplied by Program.cs for use inside Configure().
+    // Must be set before the first call to Configure().
+    private static ILogger? s_logger;
+
+    /// <summary>
+    /// Stores the <see cref="ILogger"/> that will be forwarded to
+    /// <c>NativeLibraryConfig.All.WithLogCallback</c> so that every llama.cpp
+    /// native log message flows through the application's Serilog pipeline.
+    /// </summary>
+    /// <remarks>
+    /// This must be called before <see cref="Configure"/> because the log callback
+    /// is registered as part of the one-time native library setup and cannot be
+    /// changed after the library has loaded.
+    /// </remarks>
+    /// <param name="loggerFactory">The shared logger factory, typically Serilog-backed.</param>
+    public static void ConfigureLogging(ILoggerFactory loggerFactory)
+    {
+        lock (SyncRoot)
+        {
+            s_logger = loggerFactory.CreateLogger(typeof(LlamaNativeService).FullName!);
+        }
+    }
 
     /// <summary>
     /// Applies the LLamaSharp native-library backend preferences for the current
@@ -43,12 +72,19 @@ public static class LlamaNativeService
 
             var useVulkan = preferGpu && string.Equals(backend, "vulkan", StringComparison.OrdinalIgnoreCase);
 
-            // Disable CUDA explicitly (this project targets Intel Arc / Vulkan, not NVIDIA).
-            // WithAutoFallback(true) lets LLamaSharp fall back to CPU if Vulkan fails to load.
-            NativeLibraryConfig.All
+            var config = NativeLibraryConfig.All
                 .WithCuda(false)
                 .WithVulkan(useVulkan)
                 .WithAutoFallback(true);
+
+            // Route all llama.cpp native log messages through the application logger
+            // so they appear in the same Serilog rolling file as the rest of the app.
+            // The ILogger overload maps llama.cpp log levels to the corresponding
+            // Microsoft.Extensions.Logging levels automatically.
+            if (s_logger is not null)
+            {
+                config.WithLogCallback(s_logger);
+            }
 
             s_configured = true;
         }

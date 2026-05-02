@@ -1,7 +1,8 @@
 {
   "profiles": {
     "WeatherAiDotNet": {
-      "commandName": "Project"
+      "commandName": "Project",
+      "commandLineArgs": "-- --gpu-layers 999 --threads 8 --batch-threads 8 --batch-size 512 --ubatch-size 256"
     },
     "Container (Dockerfile)": {
       "commandName": "Docker"

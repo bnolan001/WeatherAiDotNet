@@ -2,6 +2,7 @@ using System.Text;
 using LLama;
 using LLama.Common;
 using LLama.Sampling;
+using Microsoft.Extensions.Logging;
 using WeatherAiDotNet.Models;
 
 namespace WeatherAiDotNet.Services;
@@ -22,6 +23,9 @@ public static class LlamaGenerationService
 {
     private static readonly object SyncRoot = new();
 
+    // Shared logger used by this service and LLamaSharp runtime objects.
+    private static ILogger? s_logger;
+
     // Lazily initialised LLamaSharp objects; null until first call.
     private static LLamaWeights? s_weights;
     private static StatelessExecutor? s_executor;
@@ -39,6 +43,19 @@ public static class LlamaGenerationService
     private static int s_uBatchSize;
     private static string? s_initializationDiagnostic;
     private static string s_runtimeBackend = "unknown";
+
+    /// <summary>
+    /// Configures the logger factory used by this service and by the embedded
+    /// LLamaSharp runtime objects it creates.
+    /// </summary>
+    /// <param name="loggerFactory">The shared logger factory, typically Serilog-backed.</param>
+    public static void ConfigureLogging(ILoggerFactory loggerFactory)
+    {
+        lock (SyncRoot)
+        {
+            s_logger = loggerFactory.CreateLogger(typeof(LlamaGenerationService).FullName!);
+        }
+    }
 
     /// <summary>Returns a label identifying the active hardware backend (e.g., "vulkan" or "cpu").</summary>
     public static string GetRuntimeBackend()
@@ -172,18 +189,20 @@ public static class LlamaGenerationService
                 // Attempt to load with the requested GPU layer count.
                 var modelParams = LlamaNativeService.CreateGenerationModelParams(modelPath, gpuLayers, contextSize, threads, batchThreads, batchSize, uBatchSize);
                 s_weights = LLamaWeights.LoadFromFile(modelParams);
-                s_executor = new StatelessExecutor(s_weights, modelParams, logger: null);
+                s_executor = new StatelessExecutor(s_weights, modelParams, logger: s_logger);
                 s_initializationDiagnostic = null;
                 s_runtimeBackend = LlamaNativeService.GetRequestedRuntimeBackend(backend, preferGpu, gpuLayers);
+                s_logger?.LogInformation("Generation model initialized using backend {Backend}.", s_runtimeBackend);
             }
             catch (Exception gpuEx) when (preferGpu && gpuLayers > 0)
             {
                 // GPU load failed; retry in CPU-only mode so the app can still answer questions.
                 var cpuParams = LlamaNativeService.CreateGenerationModelParams(modelPath, 0, contextSize, threads, batchThreads, batchSize, uBatchSize);
                 s_weights = LLamaWeights.LoadFromFile(cpuParams);
-                s_executor = new StatelessExecutor(s_weights, cpuParams, logger: null);
+                s_executor = new StatelessExecutor(s_weights, cpuParams, logger: s_logger);
                 s_initializationDiagnostic = $"Generation model could not start on the Intel/Vulkan path and was moved to CPU-only mode. {gpuEx.Message}";
                 s_runtimeBackend = "cpu";
+                s_logger?.LogWarning(gpuEx, "Generation GPU initialization failed. Falling back to CPU mode.");
             }
 
             // Persist the settings so we can detect changes on the next call.

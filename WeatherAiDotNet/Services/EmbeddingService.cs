@@ -1,5 +1,6 @@
 using System.Text;
 using LLama;
+using Microsoft.Extensions.Logging;
 using WeatherAiDotNet.Models;
 
 namespace WeatherAiDotNet.Services;
@@ -25,6 +26,10 @@ public static class EmbeddingService
 {
     private static readonly object SyncRoot = new();
 
+    // Shared logger plumbing so LLamaSharp and this service emit through the same
+    // Serilog-backed Microsoft.Extensions.Logging pipeline.
+    private static ILogger? s_logger;
+
     // Lazily initialised LLamaSharp objects; null until first use.
     private static LLamaWeights? s_weights;
     private static LLamaEmbedder? s_embedder;
@@ -42,6 +47,19 @@ public static class EmbeddingService
     private static int s_uBatchSize;
     private static string? s_initializationDiagnostic;
     private static string s_runtimeBackend = "unknown";
+
+    /// <summary>
+    /// Configures the logger factory used by this service and by the embedded
+    /// LLamaSharp runtime objects it creates.
+    /// </summary>
+    /// <param name="loggerFactory">The shared logger factory, typically Serilog-backed.</param>
+    public static void ConfigureLogging(ILoggerFactory loggerFactory)
+    {
+        lock (SyncRoot)
+        {
+            s_logger = loggerFactory.CreateLogger(typeof(EmbeddingService).FullName!);
+        }
+    }
 
     /// <summary>Returns a label identifying the active hardware backend (e.g., "vulkan" or "cpu").</summary>
     public static string GetRuntimeBackend()
@@ -259,9 +277,10 @@ public static class EmbeddingService
                 // Attempt to load the model with the requested GPU layer count.
                 var modelParams = LlamaNativeService.CreateEmbeddingModelParams(embeddingModelPath, gpuLayers, contextSize, threads, batchThreads, batchSize, uBatchSize);
                 s_weights = LLamaWeights.LoadFromFile(modelParams);
-                s_embedder = new LLamaEmbedder(s_weights, modelParams, logger: null);
+                s_embedder = new LLamaEmbedder(s_weights, modelParams, logger: s_logger);
                 s_initializationDiagnostic = null;
                 s_runtimeBackend = LlamaNativeService.GetRequestedRuntimeBackend(backend, preferGpu, gpuLayers);
+                s_logger?.LogInformation("Embedding model initialized using backend {Backend}.", s_runtimeBackend);
             }
             catch (Exception gpuEx) when (preferGpu && gpuLayers > 0)
             {
@@ -270,13 +289,15 @@ public static class EmbeddingService
                 {
                     var cpuParams = LlamaNativeService.CreateEmbeddingModelParams(embeddingModelPath, 0, contextSize, threads, batchThreads, batchSize, uBatchSize);
                     s_weights = LLamaWeights.LoadFromFile(cpuParams);
-                    s_embedder = new LLamaEmbedder(s_weights, cpuParams, logger: null);
+                    s_embedder = new LLamaEmbedder(s_weights, cpuParams, logger: s_logger);
                     s_initializationDiagnostic = $"Embedding model could not start on the Intel/Vulkan path and was moved to CPU-only mode. {gpuEx.Message}";
                     s_runtimeBackend = "cpu";
+                    s_logger?.LogWarning(gpuEx, "Embedding GPU initialization failed. Falling back to CPU mode.");
                 }
                 catch (Exception cpuEx)
                 {
                     // Both GPU and CPU failed; the embedder cannot be used.
+                    s_logger?.LogError(cpuEx, "Embedding model initialization failed on both GPU and CPU.");
                     diagnostic = CombineDiagnostic(gpuEx.Message, cpuEx.Message);
                     return false;
                 }

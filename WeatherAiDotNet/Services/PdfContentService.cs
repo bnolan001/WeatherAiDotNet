@@ -2,8 +2,9 @@ using System.Diagnostics;
 using System.Text;
 using iText.Kernel.Pdf;
 using iText.Kernel.Pdf.Canvas.Parser;
+using iText.Kernel.Pdf.Canvas.Parser.Data;
 using iText.Kernel.Pdf.Canvas.Parser.Listener;
-using UglyToad.PdfPig;
+using iText.Kernel.Pdf.Xobject;
 using WeatherAiDotNet.Models;
 
 namespace WeatherAiDotNet.Services;
@@ -18,20 +19,20 @@ namespace WeatherAiDotNet.Services;
 /// <para>
 /// <b>Text extraction</b> uses iText7's <see cref="LocationTextExtractionStrategy"/>, 
 /// which sorts glyph positions by their (x, y) coordinates before assembling words
-/// and lines.  This preserves multi-column layouts and reading order far better than
-/// PdfPig's simple concatenation approach.
+/// and lines. This preserves multi-column layouts and reading order far better than
+/// simple concatenation approaches.
 /// </para>
 /// <para>
 /// <b>Table detection</b> is heuristic: consecutive lines whose words can be split
 /// into a consistent number of tab- or multi-space-separated columns are treated as
-/// a table and serialised to Markdown <c>| cell |</c> syntax.  LLMs understand this
+/// a table and serialised to Markdown <c>| cell |</c> syntax. LLMs understand this
 /// format natively, which improves their ability to answer questions about tabular
 /// data such as weather observation tables or reference charts.
 /// </para>
 /// <para>
-/// <b>Image extraction</b> still uses PdfPig because it provides reliable PNG
-/// conversion of embedded raster images.  Each image is optionally OCR'd with a
-/// Tesseract-compatible CLI and the resulting text is embedded as a regular chunk.
+/// <b>Image extraction</b> uses iText's page canvas parser to capture rendered image
+/// XObjects. Each image is written to disk with a detected extension, optionally
+/// OCR'd with a Tesseract-compatible CLI, and then indexed as vector text metadata.
 /// </para>
 /// </remarks>
 public static class PdfContentService
@@ -284,16 +285,15 @@ public static class PdfContentService
     }
 
     /// <summary>
-    /// Extracts every embedded raster image from a PDF using PdfPig (which provides
-    /// reliable PNG conversion), writes each one to disk, and optionally runs OCR on
-    /// it to produce indexable text.
+    /// Extracts every embedded raster image from a PDF using iText canvas parsing,
+    /// writes each one to disk, and optionally runs OCR on it to produce indexable text.
     /// </summary>
     /// <param name="pdfPath">Absolute path to the source PDF.</param>
     /// <param name="pdfRoot">
     /// Root folder for PDFs; used to compute a relative path for metadata tags.
     /// </param>
     /// <param name="imagesOutputPath">
-    /// Folder where extracted PNG files are saved.  Sub-directories mirror the
+    /// Folder where extracted image files are saved. Sub-directories mirror the
     /// relative PDF structure so images from different PDFs stay separate.
     /// </param>
     /// <param name="ocrCliPath">
@@ -301,7 +301,7 @@ public static class PdfContentService
     /// string to skip OCR.
     /// </param>
     /// <returns>
-    /// A list of <see cref="PdfImageItem"/> records, one per extracted image.  Each
+    /// A list of <see cref="PdfImageItem"/> records, one per extracted image. Each
     /// record contains metadata and any OCR text, ready for embedding and indexing.
     /// </returns>
     public static List<PdfImageItem> ExtractPdfImageItems(string pdfPath, string pdfRoot, string imagesOutputPath, string ocrCliPath)
@@ -315,26 +315,33 @@ public static class PdfContentService
             Path.GetDirectoryName(relativePdfPath) ?? string.Empty,
             Path.GetFileNameWithoutExtension(relativePdfPath));
 
-        // PdfPig is used here (not iText7) because it provides a convenient
-        // TryGetPng() helper that handles JPEG/JBIG2/CCITT → PNG conversion reliably.
-        using var document = UglyToad.PdfPig.PdfDocument.Open(pdfPath);
+        using var reader = new PdfReader(pdfPath);
+        using var document = new iText.Kernel.Pdf.PdfDocument(reader);
 
-        foreach (var page in document.GetPages())
+        for (var pageNumber = 1; pageNumber <= document.GetNumberOfPages(); pageNumber++)
         {
+            var page = document.GetPage(pageNumber);
+
+            var imageCollector = new ImageRenderCollector();
+            var processor = new PdfCanvasProcessor(imageCollector);
+            processor.ProcessPageContent(page);
+
             var imageNumber = 0;
-            foreach (var image in page.GetImages())
+            foreach (var image in imageCollector.Images)
             {
                 imageNumber++;
 
-                // Skip images that cannot be decoded to PNG bytes (e.g., JBIG2, CMYK).
-                if (!image.TryGetPng(out var pngBytes))
+                var imageBytes = image.GetImageBytes();
+                if (imageBytes is null || imageBytes.Length == 0)
                 {
                     continue;
                 }
 
+                var extension = DetectImageExtension(imageBytes);
+
                 // Build a deterministic file name using page and image numbers so
                 // re-indexing always overwrites the same file rather than accumulating duplicates.
-                var imageRelativePath = Path.Combine(pdfRelativeWithoutExtension, $"page-{page.Number:D4}-image-{imageNumber:D3}.png");
+                var imageRelativePath = Path.Combine(pdfRelativeWithoutExtension, $"page-{pageNumber:D4}-image-{imageNumber:D3}.{extension}");
                 var imageFullPath = Path.Combine(imagesOutputPath, imageRelativePath);
 
                 var imageDirectory = Path.GetDirectoryName(imageFullPath);
@@ -343,7 +350,7 @@ public static class PdfContentService
                     Directory.CreateDirectory(imageDirectory);
                 }
 
-                File.WriteAllBytes(imageFullPath, pngBytes);
+                File.WriteAllBytes(imageFullPath, imageBytes);
 
                 // Attempt OCR; returns empty string if ocrCliPath is blank or OCR fails.
                 var ocrText = TryRunOcr(ocrCliPath, imageFullPath);
@@ -353,10 +360,10 @@ public static class PdfContentService
                 // Structured metadata tags make it easier for the model to cite the
                 // source of image-derived context in its answers.
                 var indexText = string.IsNullOrWhiteSpace(ocrText)
-                    ? $"[PDF_IMAGE] file={relativePdfPath}; page={page.Number}; image={imageNumber}; path={relativeImagePath}; no_ocr_text_available"
-                    : $"[PDF_IMAGE] file={relativePdfPath}; page={page.Number}; image={imageNumber}; path={relativeImagePath}; ocr_text={ocrText}";
+                    ? $"[PDF_IMAGE] file={relativePdfPath}; page={pageNumber}; image={imageNumber}; path={relativeImagePath}; no_ocr_text_available"
+                    : $"[PDF_IMAGE] file={relativePdfPath}; page={pageNumber}; image={imageNumber}; path={relativeImagePath}; ocr_text={ocrText}";
 
-                items.Add(new PdfImageItem(relativeImagePath, page.Number, imageNumber, indexText));
+                items.Add(new PdfImageItem(relativeImagePath, pageNumber, imageNumber, indexText));
             }
         }
 
@@ -521,5 +528,78 @@ public static class PdfContentService
         }
 
         return builder.ToString().Trim();
+    }
+
+    /// <summary>
+    /// Detects a likely image file extension from magic bytes. Falls back to
+    /// <c>bin</c> when the format cannot be recognized.
+    /// </summary>
+    private static string DetectImageExtension(byte[] bytes)
+    {
+        if (bytes.Length >= 8
+            && bytes[0] == 0x89
+            && bytes[1] == 0x50
+            && bytes[2] == 0x4E
+            && bytes[3] == 0x47)
+        {
+            return "png";
+        }
+
+        if (bytes.Length >= 3
+            && bytes[0] == 0xFF
+            && bytes[1] == 0xD8
+            && bytes[2] == 0xFF)
+        {
+            return "jpg";
+        }
+
+        if (bytes.Length >= 6
+            && bytes[0] == 0x47
+            && bytes[1] == 0x49
+            && bytes[2] == 0x46)
+        {
+            return "gif";
+        }
+
+        if (bytes.Length >= 2
+            && bytes[0] == 0x42
+            && bytes[1] == 0x4D)
+        {
+            return "bmp";
+        }
+
+        if (bytes.Length >= 4
+            && ((bytes[0] == 0x49 && bytes[1] == 0x49 && bytes[2] == 0x2A && bytes[3] == 0x00)
+                || (bytes[0] == 0x4D && bytes[1] == 0x4D && bytes[2] == 0x00 && bytes[3] == 0x2A)))
+        {
+            return "tif";
+        }
+
+        return "bin";
+    }
+
+    private sealed class ImageRenderCollector : IEventListener
+    {
+        public List<PdfImageXObject> Images { get; } = [];
+
+        public ICollection<EventType> GetSupportedEvents()
+            => [EventType.RENDER_IMAGE];
+
+        public void EventOccurred(IEventData data, EventType type)
+        {
+            if (type != EventType.RENDER_IMAGE)
+            {
+                return;
+            }
+
+            if (data is ImageRenderInfo imageRenderInfo)
+            {
+                var image = imageRenderInfo.GetImage();
+                if (image is not null)
+                {
+                    Images.Add(image);
+                }
+            }
+        }
     }
 }
