@@ -1,3 +1,3 @@
 namespace WeatherAiDotNet.RagIndexing;
 
-public sealed record RagImageItem(string IndexText);
+public record RagImageItem(string IndexText);

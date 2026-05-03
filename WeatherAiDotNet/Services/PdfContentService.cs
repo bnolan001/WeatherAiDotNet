@@ -65,7 +65,7 @@ public static class PdfContentService
         var pageBuilder = new StringBuilder();
 
         using var reader = new PdfReader(pdfPath);
-        using var document = new iText.Kernel.Pdf.PdfDocument(reader);
+        using var document = new PdfDocument(reader);
 
         for (var pageNumber = 1; pageNumber <= document.GetNumberOfPages(); pageNumber++)
         {

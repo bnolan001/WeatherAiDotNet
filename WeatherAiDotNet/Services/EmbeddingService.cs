@@ -96,6 +96,7 @@ public static class EmbeddingService
     {
         if (useModelEmbeddings)
         {
+            s_logger?.LogInformation("Using Model Embeddings");
             var vector = await GenerateEmbeddingWithLlamaSharpAsync(
                 embeddingModelPath,
                 backend,
@@ -117,6 +118,7 @@ public static class EmbeddingService
             }
         }
 
+        s_logger.LogWarning("Falling back to LocalEmbedding instead of LlamaSharp");
         // Model unavailable or returned an empty array; use the deterministic fallback.
         return CreateLocalEmbedding(input, fallbackEmbeddingSize);
     }

@@ -107,7 +107,7 @@ public class AppOptions
     /// Token context window size (maximum tokens the model can see at once).
     /// Larger contexts improve understanding but use more memory.
     /// Must be compatible with the model's training context length.
-    /// Default: 4096
+    /// Default: 8192
     /// Command-line: --ctx-size
     /// </summary>
     public required int ContextSize { get; init; }
@@ -207,7 +207,7 @@ public class AppOptions
             RetrievalPool = int.TryParse(CommandLineParser.GetOption(values, "retrieval-pool", "24"), out var retrievalPool) ? retrievalPool : 24,
             EmbeddingSize = int.TryParse(CommandLineParser.GetOption(values, "embedding-size", "384"), out var embeddingSize) ? embeddingSize : 384,
             GpuLayers = int.TryParse(CommandLineParser.GetOption(values, "gpu-layers", "999"), out var gpuLayers) ? gpuLayers : 999,
-            ContextSize = int.TryParse(CommandLineParser.GetOption(values, "ctx-size", "4096"), out var contextSize) ? contextSize : 4096,
+            ContextSize = int.TryParse(CommandLineParser.GetOption(values, "ctx-size", "8192"), out var contextSize) ? contextSize : 4096,
 
             // Clamp thread counts to at least 1 to prevent invalid LLamaSharp configurations.
             Threads = int.TryParse(CommandLineParser.GetOption(values, "threads", defaultThreads.ToString()), out var threads) ? Math.Max(1, threads) : defaultThreads,

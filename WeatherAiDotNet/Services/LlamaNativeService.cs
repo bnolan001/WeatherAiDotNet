@@ -71,9 +71,10 @@ public static class LlamaNativeService
             }
 
             var useVulkan = preferGpu && string.Equals(backend, "vulkan", StringComparison.OrdinalIgnoreCase);
-
+            var useCuda = preferGpu && !string.Equals(backend, "vulkan", StringComparison.OrdinalIgnoreCase);
+            
             var config = NativeLibraryConfig.All
-                .WithCuda(false)
+                .WithCuda(useCuda)
                 .WithVulkan(useVulkan)
                 .WithAutoFallback(true);
 

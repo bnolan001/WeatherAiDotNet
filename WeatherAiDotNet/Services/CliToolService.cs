@@ -78,6 +78,7 @@ public static class CliToolService
 
             // Prefer stderr for the error message; fall back to stdout if stderr is empty.
             var message = string.IsNullOrWhiteSpace(error) ? output : error;
+                        
             return new ToolCheckResult(false, string.IsNullOrWhiteSpace(message)
                 ? $"Process exited with code {process.ExitCode}."
                 : message.Trim());

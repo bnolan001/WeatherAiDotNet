@@ -263,9 +263,9 @@ try
 
     while (true)
     {
-        Console.Write("> ");
+        Console.Write("Weather Inquiry:> ");
         var question = Console.ReadLine();
-
+        Console.WriteLine("Thinking...");
         // An empty line signals the user wants to exit.
         if (string.IsNullOrWhiteSpace(question))
         {
@@ -330,7 +330,7 @@ try
         var answer = await LlamaGenerationService.GenerateAnswerAsync(
             appOptions.ModelPath,
             prompt,
-            maxTokens: 400,
+            maxTokens: 4096,
             appOptions.LlamaBackend,
             appOptions.PreferGpu,
             appOptions.GpuLayers,
@@ -355,6 +355,26 @@ try
         Log.Information("Answer: {Answer}", answer);
         Console.WriteLine();
         Console.WriteLine(answer);
+
+        var citedReferenceNumbers = Regex.Matches(answer, @"\[(\d+)\]")
+            .Select(match => int.TryParse(match.Groups[1].Value, out var number) ? number : -1)
+            .Where(number => number >= 1 && number <= matches.Count)
+            .Distinct()
+            .OrderBy(number => number)
+            .ToList();
+
+        if (citedReferenceNumbers.Count > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine("References:");
+
+            foreach (var referenceNumber in citedReferenceNumbers)
+            {
+                var source = matches[referenceNumber - 1].Source;
+                Console.WriteLine($"[{referenceNumber}] {source}");
+            }
+        }
+
         Console.WriteLine();
     }
 }
