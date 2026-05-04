@@ -93,6 +93,7 @@ try
         appOptions.BatchThreads,
         appOptions.BatchSize,
         appOptions.UBatchSize);
+
     Log.Information(
         "Retrieval tuning: top-k={TopK}, retrieval-pool={RetrievalPool}, chunk-size={ChunkSize}, chunk-overlap={ChunkOverlap}.",
         appOptions.TopK,
@@ -146,6 +147,29 @@ try
         appOptions.BatchThreads,
         appOptions.BatchSize,
         appOptions.UBatchSize);
+
+    // If the preferred backend probe fails, run a conservative CPU-only probe to
+    // determine whether the model itself works but current runtime settings are too
+    // aggressive for embedding inference on this machine.
+    if (embeddingProbe.Vector is null)
+    {
+        var conservativeEmbeddingProbe = await EmbeddingService.ProbeAsync(
+            appOptions.EmbeddingModelPath,
+            backend: "cpu",
+            preferGpu: false,
+            gpuLayers: 0,
+            contextSize: Math.Min(appOptions.ContextSize, 2048),
+            threads: Math.Max(1, Math.Min(appOptions.Threads, 8)),
+            batchThreads: Math.Max(1, Math.Min(appOptions.BatchThreads, 8)),
+            batchSize: Math.Min(appOptions.BatchSize, 64),
+            uBatchSize: Math.Min(appOptions.UBatchSize, 64));
+
+        if (conservativeEmbeddingProbe.Vector is { Length: > 0 })
+        {
+            embeddingProbe = conservativeEmbeddingProbe;
+            Log.Warning("Primary embedding probe failed, but conservative CPU embedding probe succeeded. Using model embeddings with conservative settings.");
+        }
+    }
 
     // --- Probe the generation model -----------------------------------------------
     // Similarly, we try to load the generation model weights before the Q&A loop so
@@ -203,6 +227,27 @@ try
     // length if available; otherwise use the configured fallback size.
     var effectiveEmbeddingSize = useModelEmbeddings ? embeddingProbe.Vector!.Length : appOptions.EmbeddingSize;
 
+    // Build a version stamp that captures embedding-relevant settings.
+    // We append this stamp to each document fingerprint so unchanged PDFs are
+    // still re-indexed automatically when the embedding model (or its effective
+    // vector shape/configuration) changes.
+    var embeddingModelInfo = new FileInfo(appOptions.EmbeddingModelPath);
+    var embeddingVersionStamp = string.Join('|',
+        Path.GetFileName(appOptions.EmbeddingModelPath),
+        embeddingModelInfo.Length,
+        embeddingModelInfo.LastWriteTimeUtc.Ticks,
+        effectiveEmbeddingSize,
+        appOptions.ContextSize,
+        appOptions.BatchSize,
+        appOptions.UBatchSize,
+        appOptions.ChunkSize,
+        appOptions.ChunkOverlap);
+
+    // Startup visibility: this stamp is part of every stored fingerprint and is the
+    // mechanism that forces safe automatic re-indexing when embedding-relevant inputs
+    // change (model file, quantization swap, vector size, or chunk settings).
+    Log.Information("Embedding index version stamp: {EmbeddingVersionStamp}", embeddingVersionStamp);
+
     // --- Incremental PDF indexing -------------------------------------------------
 
     var indexingSummary = await RagDatabaseIndexer.IndexAsync(
@@ -231,9 +276,16 @@ try
             appOptions.BatchSize,
             appOptions.UBatchSize),
         (relativePdfPath, fingerprint) =>
-            VectorStoreService.IsDocumentUpToDate(appOptions.DbPath, appOptions.CollectionName, relativePdfPath, fingerprint),
+        {
+            // Include embedding version in the stored fingerprint so switching to a
+            // different GGUF (for example Q4_K_M), replacing a file in-place, or
+            // changing key embedding/chunk parameters forces a safe re-index.
+            var versionedFingerprint = $"{fingerprint}|embed={embeddingVersionStamp}";
+            return VectorStoreService.IsDocumentUpToDate(appOptions.DbPath, appOptions.CollectionName, relativePdfPath, versionedFingerprint);
+        },
         (relativePdfPath, fingerprint, vectors) =>
         {
+            var versionedFingerprint = $"{fingerprint}|embed={embeddingVersionStamp}";
             var storedVectors = vectors
                 .Select(v => new WeatherAiDotNet.Models.StoredVector(appOptions.CollectionName, relativePdfPath, v.ChunkIndex, v.Text, v.Vector))
                 .ToList();
@@ -242,7 +294,7 @@ try
                 appOptions.DbPath,
                 appOptions.CollectionName,
                 relativePdfPath,
-                fingerprint,
+                versionedFingerprint,
                 storedVectors);
         },
         message => Log.Information("{Message}", message),
@@ -320,31 +372,32 @@ try
         // The [N] prefix and Source tag help the model cite its sources.
         var context = string.Join("\n\n---\n\n", matches.Select((m, idx) => $"[{idx + 1}] (Source: {m.Source})\n{m.Text}"));
 
-        // Build a grounding prompt that instructs the model to answer naturally
-        // while citing the numbered snippets inline. Keeping instructions concise
-        // reduces the chance that the model echoes back only the citation numbers.
-        var prompt = $"""
-            You are a helpful U.S. Air Force weather analyst assistant.
-            Answer the question below using ONLY the numbered context snippets provided.
-            Write a clear, complete answer in full sentences.
-            Prefer exact terminology from the snippets when it is available.
-            After each fact, add the snippet number in brackets, e.g. [1] or [2].
-            If the snippets do not contain enough information to answer, say exactly:
-            I don't know based on the indexed documents.
+        // Two-step grounded answering flow:
+        // 1) Extract evidence first (quoted/near-quoted facts with citations),
+        // 2) Compose the final answer from that evidence only.
+        // This reduces hallucinations and increases the chance that returned answers
+        // are directly supported by PDF chunks.
+        var evidencePrompt = $"""
+            You are a retrieval verifier for a U.S. Air Force weather assistant.
+            Using ONLY the numbered context snippets, extract the minimum evidence needed to answer the question.
+            Rules:
+            - Return 2 to 6 concise bullet points.
+            - Each bullet MUST end with at least one citation like [1] or [2].
+            - Do not include facts not present in the snippets.
+            - If there is not enough evidence, return exactly: NO_EVIDENCE
 
             Context snippets:
             {context}
 
             Question: {question}
 
-            Answer:
+            Evidence:
             """;
 
-        // Send the prompt to the local generation model and print the response.
-        var answer = await LlamaGenerationService.GenerateAnswerAsync(
+        var extractedEvidence = await LlamaGenerationService.GenerateAnswerAsync(
             appOptions.ModelPath,
-            prompt,
-            maxTokens: 4096,
+            evidencePrompt,
+            maxTokens: 900,
             appOptions.LlamaBackend,
             appOptions.PreferGpu,
             appOptions.GpuLayers,
@@ -356,16 +409,64 @@ try
             appOptions.Temperature,
             appOptions.TopP);
 
-        // Enforce grounding: if the model returned only whitespace or citation
-        // tokens with no surrounding text, replace with the safe fallback.
-        var trimmed = answer.Trim();
-        var isCitationOnly = !string.IsNullOrWhiteSpace(trimmed) &&
-                             Regex.IsMatch(trimmed, @"^\s*(\[\d+\]\s*[,;]?\s*)+$");
+        var evidenceText = extractedEvidence.Trim();
+        var hasEvidenceCitations = Regex.IsMatch(evidenceText, @"\[\d+\]");
 
-        if (string.IsNullOrWhiteSpace(trimmed) || isCitationOnly)
+        string answer;
+        if (string.IsNullOrWhiteSpace(evidenceText)
+            || evidenceText.Contains("NO_EVIDENCE", StringComparison.OrdinalIgnoreCase)
+            || !hasEvidenceCitations)
         {
-            Log.Warning("Model response was empty or citation-only; returning grounded fallback response.");
+            // If evidence extraction is weak, return the grounded fallback early
+            // instead of asking the model to speculate.
+            Log.Information("Evidence extraction returned insufficient support. Returning grounded fallback response.");
             answer = "I don't know based on the indexed documents.";
+        }
+        else
+        {
+            var answerPrompt = $"""
+                You are a helpful U.S. Air Force weather analyst assistant.
+                Answer the question using ONLY the evidence bullets below.
+                Write a clear, complete answer in full sentences.
+                Preserve key terminology from the evidence when relevant.
+                After each fact, include supporting citations, e.g. [1] or [2].
+                If the evidence does not support an answer, say exactly:
+                I don't know based on the indexed documents.
+
+                Question: {question}
+
+                Evidence bullets:
+                {evidenceText}
+
+                Answer:
+                """;
+
+            answer = await LlamaGenerationService.GenerateAnswerAsync(
+                appOptions.ModelPath,
+                answerPrompt,
+                maxTokens: 2048,
+                appOptions.LlamaBackend,
+                appOptions.PreferGpu,
+                appOptions.GpuLayers,
+                appOptions.ContextSize,
+                appOptions.Threads,
+                appOptions.BatchThreads,
+                appOptions.BatchSize,
+                appOptions.UBatchSize,
+                appOptions.Temperature,
+                appOptions.TopP);
+
+            // Enforce grounding: if the model returned only whitespace or citation
+            // tokens with no surrounding text, replace with the safe fallback.
+            var trimmed = answer.Trim();
+            var isCitationOnly = !string.IsNullOrWhiteSpace(trimmed) &&
+                                 Regex.IsMatch(trimmed, @"^\s*(\[\d+\]\s*[,;]?\s*)+$");
+
+            if (string.IsNullOrWhiteSpace(trimmed) || isCitationOnly)
+            {
+                Log.Warning("Model response was empty or citation-only; returning grounded fallback response.");
+                answer = "I don't know based on the indexed documents.";
+            }
         }
 
         Log.Information("Answer: {Answer}", answer);

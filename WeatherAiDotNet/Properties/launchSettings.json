@@ -2,7 +2,7 @@
   "profiles": {
     "WeatherAiDotNet": {
       "commandName": "Project",
-      "commandLineArgs": "-- --gpu-layers 999 --threads 8 --batch-threads 8 --batch-size 512 --ubatch-size 256"
+      "commandLineArgs": "--   --pdf-folder \"./Data\"   --model-path \"./AiModels/qwen2.5-coder-7b-instruct-q4_k_m.gguf\"   --embedding-model-path \"./AiModels/nomic-embed-text-v1.5.Q4_K_M.gguf\"   --llama-backend vulkan --prefer-gpu true   --gpu-layers 999   --ctx-size 131072 --threads 8   --batch-threads 8   --batch-size 512   --ubatch-size 256   --top-k 10   --retrieval-pool 64   --chunk-size 900   --chunk-overlap 180   --temperature 0.2   --top-p 0.85   --include-images true"
     },
     "Container (Dockerfile)": {
       "commandName": "Docker"

@@ -239,7 +239,7 @@ public class AppOptions
             RetrievalPool = int.TryParse(CommandLineParser.GetOption(values, "retrieval-pool", "48"), out var retrievalPool) ? Math.Max(8, retrievalPool) : 48,
             EmbeddingSize = int.TryParse(CommandLineParser.GetOption(values, "embedding-size", "384"), out var embeddingSize) ? embeddingSize : 384,
             GpuLayers = int.TryParse(CommandLineParser.GetOption(values, "gpu-layers", "999"), out var gpuLayers) ? gpuLayers : 999,
-            ContextSize = int.TryParse(CommandLineParser.GetOption(values, "ctx-size", "8192"), out var contextSize) ? contextSize : 4096,
+            ContextSize = int.TryParse(CommandLineParser.GetOption(values, "ctx-size", "131072"), out var contextSize) ? contextSize : 4096,
             ChunkSize = int.TryParse(CommandLineParser.GetOption(values, "chunk-size", "900"), out var chunkSize) ? Math.Max(300, chunkSize) : 900,
             ChunkOverlap = int.TryParse(CommandLineParser.GetOption(values, "chunk-overlap", "180"), out var chunkOverlap) ? Math.Max(60, chunkOverlap) : 180,
             Temperature = float.TryParse(CommandLineParser.GetOption(values, "temperature", "0.2"), out var temperature) ? Math.Clamp(temperature, 0f, 2f) : 0.2f,

@@ -118,7 +118,7 @@ public static class EmbeddingService
             }
         }
 
-        s_logger.LogWarning("Falling back to LocalEmbedding instead of LlamaSharp");
+        s_logger?.LogWarning("Falling back to LocalEmbedding instead of LlamaSharp");
         // Model unavailable or returned an empty array; use the deterministic fallback.
         return CreateLocalEmbedding(input, fallbackEmbeddingSize);
     }
@@ -253,17 +253,26 @@ public static class EmbeddingService
     {
         lock (SyncRoot)
         {
+            // Embedding models are sensitive to overly aggressive runtime settings
+            // (especially batch/ubatch/context). Clamp to a conservative profile so
+            // quantized GGUF variants are more likely to return vectors reliably.
+            var effectiveContextSize = Math.Clamp(contextSize, 512, 4096);
+            var effectiveThreads = Math.Max(1, threads);
+            var effectiveBatchThreads = Math.Max(1, batchThreads);
+            var effectiveBatchSize = Math.Clamp(batchSize, 32, 128);
+            var effectiveUBatchSize = Math.Clamp(uBatchSize, 32, 64);
+
             // Return the existing instance if nothing has changed.
             if (s_embedder is not null
                 && string.Equals(s_modelPath, embeddingModelPath, StringComparison.OrdinalIgnoreCase)
                 && string.Equals(s_backend, backend, StringComparison.OrdinalIgnoreCase)
                 && s_preferGpu == preferGpu
                 && s_gpuLayers == gpuLayers
-                && s_contextSize == contextSize
-                && s_threads == threads
-                && s_batchThreads == batchThreads
-                && s_batchSize == batchSize
-                && s_uBatchSize == uBatchSize)
+                && s_contextSize == effectiveContextSize
+                && s_threads == effectiveThreads
+                && s_batchThreads == effectiveBatchThreads
+                && s_batchSize == effectiveBatchSize
+                && s_uBatchSize == effectiveUBatchSize)
             {
                 diagnostic = s_initializationDiagnostic;
                 return true;
@@ -277,19 +286,47 @@ public static class EmbeddingService
             try
             {
                 // Attempt to load the model with the requested GPU layer count.
-                var modelParams = LlamaNativeService.CreateEmbeddingModelParams(embeddingModelPath, gpuLayers, contextSize, threads, batchThreads, batchSize, uBatchSize);
+                var modelParams = LlamaNativeService.CreateEmbeddingModelParams(
+                    embeddingModelPath,
+                    gpuLayers,
+                    effectiveContextSize,
+                    effectiveThreads,
+                    effectiveBatchThreads,
+                    effectiveBatchSize,
+                    effectiveUBatchSize);
                 s_weights = LLamaWeights.LoadFromFile(modelParams);
                 s_embedder = new LLamaEmbedder(s_weights, modelParams, logger: s_logger);
                 s_initializationDiagnostic = null;
                 s_runtimeBackend = LlamaNativeService.GetRequestedRuntimeBackend(backend, preferGpu, gpuLayers);
                 s_logger?.LogInformation("Embedding model initialized using backend {Backend}.", s_runtimeBackend);
+
+                if (effectiveContextSize != contextSize
+                    || effectiveBatchSize != batchSize
+                    || effectiveUBatchSize != uBatchSize)
+                {
+                    s_logger?.LogInformation(
+                        "Embedding runtime settings were adjusted for stability: requested ctx={RequestedCtx}, batch={RequestedBatch}, ubatch={RequestedUBatch}; effective ctx={EffectiveCtx}, batch={EffectiveBatch}, ubatch={EffectiveUBatch}.",
+                        contextSize,
+                        batchSize,
+                        uBatchSize,
+                        effectiveContextSize,
+                        effectiveBatchSize,
+                        effectiveUBatchSize);
+                }
             }
             catch (Exception gpuEx) when (preferGpu && gpuLayers > 0)
             {
                 // GPU load failed; retry with 0 GPU layers to force CPU-only mode.
                 try
                 {
-                    var cpuParams = LlamaNativeService.CreateEmbeddingModelParams(embeddingModelPath, 0, contextSize, threads, batchThreads, batchSize, uBatchSize);
+                    var cpuParams = LlamaNativeService.CreateEmbeddingModelParams(
+                        embeddingModelPath,
+                        0,
+                        effectiveContextSize,
+                        effectiveThreads,
+                        effectiveBatchThreads,
+                        effectiveBatchSize,
+                        effectiveUBatchSize);
                     s_weights = LLamaWeights.LoadFromFile(cpuParams);
                     s_embedder = new LLamaEmbedder(s_weights, cpuParams, logger: s_logger);
                     s_initializationDiagnostic = $"Embedding model could not start on the Intel/Vulkan path and was moved to CPU-only mode. {gpuEx.Message}";
@@ -310,11 +347,11 @@ public static class EmbeddingService
             s_backend = backend;
             s_preferGpu = preferGpu;
             s_gpuLayers = gpuLayers;
-            s_contextSize = contextSize;
-            s_threads = threads;
-            s_batchThreads = batchThreads;
-            s_batchSize = batchSize;
-            s_uBatchSize = uBatchSize;
+            s_contextSize = effectiveContextSize;
+            s_threads = effectiveThreads;
+            s_batchThreads = effectiveBatchThreads;
+            s_batchSize = effectiveBatchSize;
+            s_uBatchSize = effectiveUBatchSize;
             diagnostic = s_initializationDiagnostic;
             return true;
         }

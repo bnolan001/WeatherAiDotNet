@@ -7,6 +7,11 @@ winget install --id UB-Mannheim.TesseractOCR -e
 winget install llama.cpp
 ```
 
+## Models
+
+Embedding model: nomic-embed-text-v1.5.Q4_K_M.gguf available at https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/tree/main
+Inference model: qwen2.5-coder-7b-instruct.Q4_K_M.gguf available at https://huggingface.co/baichuan-inc/qwen2.5-coder-7b-instruct-GGUF/tree/main
+
 ## llama-embedding.exe generation
 
 1: Run the below command to clone the official repository or alternatively get it from the download page.
@@ -37,7 +42,7 @@ dotnet run --project WeatherAiDotNet --	--gpu-layers 999 --threads 8 --batch-thr
 ```
 
 ```bash
-dotnet run --project ./WeatherAiDotNet/WeatherAiDotNet.csproj --   --pdf-folder "./Data"   --model-path "./WeatherAiDotNet/bin/Debug/net10.0/AiModels/qwen2.5-coder-7b-instruct-q4_k_m.gguf"   --embedding-model-path "./WeatherAiDotNet/bin/Debug/net10.0/AiModels/bge-base-en-v1.5-q4_k_m.gguf"   --llama-backend vulkan   --prefer-gpu true   --gpu-layers 999   --ctx-size 8192   --threads 8   --batch-threads 8   --batch-size 512   --ubatch-size 256   --top-k 8   --retrieval-pool 48   --chunk-size 900   --chunk-overlap 180   --temperature 0.2   --top-p 0.85   --include-images true
+dotnet run --project ./WeatherAiDotNet/WeatherAiDotNet.csproj --   --pdf-folder "./Data"   --model-path "./AiModels/qwen2.5-coder-7b-instruct-q4_k_m.gguf"   --embedding-model-path "./AiModels/nomic-embed-text-v1.5.Q4_K_M.gguf"   --llama-backend vulkan   --prefer-gpu true   --gpu-layers 999   --ctx-size 131072   --threads 8   --batch-threads 8   --batch-size 512   --ubatch-size 256   --top-k 8   --retrieval-pool 48   --chunk-size 900   --chunk-overlap 180   --temperature 0.2   --top-p 0.85   --include-images true
 ```
 
 Need to install Teseract then can use --ocr-cli "C:/Program Files/Tesseract-OCR/tesseract.exe"
