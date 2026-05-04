@@ -248,10 +248,18 @@ public static class VectorStoreService
             """;
         command.Parameters.AddWithValue("$collection", collectionName);
 
-        var scored = new List<SearchMatch>();
+        var scored = new List<ScoredCandidate>();
 
-        // Pre-compute the set of query tokens once for all lexical comparisons.
+        // Pre-compute query features once because they are reused for every chunk.
         var queryTerms = Tokenize(question).ToHashSet(StringComparer.Ordinal);
+        var normalizedQuestionPhrase = NormalizePhrase(question);
+
+        // For short or number-heavy questions (common in weather references, tables,
+        // and definitions), lexical matching tends to be more reliable than pure vector
+        // similarity, so we rebalance weights toward lexical evidence.
+        var isShortOrNumericQuery = queryTerms.Count <= 5 || queryTerms.Any(static term => term.Any(char.IsDigit));
+        var semanticWeight = isShortOrNumericQuery ? 0.6f : 0.78f;
+        var lexicalWeight = 1f - semanticWeight;
 
         using var reader = command.ExecuteReader();
         while (reader.Read())
@@ -274,22 +282,43 @@ public static class VectorStoreService
             // ingestion time, so the dot product equals the cosine.
             var cosine = CosineSimilarity(queryVector, vector);
 
-            // Lexical score: fraction of question tokens that appear in the chunk.
-            var lexical = LexicalOverlapScore(queryTerms, text);
+            // Lexical overlap favors chunks that contain the same key terms as the query.
+            var lexicalOverlap = LexicalOverlapScore(queryTerms, text);
 
-            // Blend the two scores.  80/20 weights favour semantic understanding
-            // while still rewarding exact keyword matches.
-            var score = (0.8f * cosine) + (0.2f * lexical);
+            // Frequency adds extra signal when a critical term appears multiple times in
+            // a chunk (for example acronyms, codes, or repeated table headers).
+            var lexicalFrequency = LexicalFrequencyScore(queryTerms, text);
 
-            scored.Add(new SearchMatch(source, chunkIndex, text, score));
+            // Explicit phrase matches are a strong indicator for factoid questions, so we
+            // apply a small additive boost instead of overwhelming the semantic score.
+            var phraseBoost = HasPhraseMatch(text, normalizedQuestionPhrase) ? 0.08f : 0f;
+
+            var lexical = (0.7f * lexicalOverlap) + (0.3f * lexicalFrequency);
+            var score = (semanticWeight * cosine) + (lexicalWeight * lexical) + phraseBoost;
+
+            scored.Add(new ScoredCandidate(source, chunkIndex, text, score, vector));
         }
 
-        // Sort by descending score, take the larger of topK/retrievalPool as a
-        // candidate pool, then trim to exactly topK for the final context window.
-        return scored
-            .OrderByDescending(x => x.Score)
-            .Take(Math.Max(topK, retrievalPool))
-            .Take(Math.Max(1, topK))
+        if (scored.Count == 0)
+        {
+            return [];
+        }
+
+        // Stage 1 (recall): pull a wider candidate set to reduce the chance of missing
+        // answer-bearing chunks that are not in the first few ranks.
+        var safeTopK = Math.Max(1, topK);
+        var candidatePoolSize = Math.Max(Math.Max(retrievalPool, safeTopK * 4), 20);
+        var candidatePool = scored
+            .OrderByDescending(item => item.Score)
+            .Take(candidatePoolSize)
+            .ToList();
+
+        // Stage 2 (precision/diversity): rerank with a small redundancy penalty so the
+        // final prompt context includes different parts of the corpus instead of near-
+        // duplicate chunks that repeat the same sentence.
+        var diversityPenalty = isShortOrNumericQuery ? 0.1f : 0.18f;
+        return RerankWithDiversity(candidatePool, safeTopK, diversityPenalty)
+            .Select(static item => new SearchMatch(item.Source, item.ChunkIndex, item.Text, item.Score))
             .ToList();
     }
 
@@ -312,6 +341,100 @@ public static class VectorStoreService
 
         var intersection = queryTerms.Count(t => chunkTerms.Contains(t));
         return intersection / (float)queryTerms.Count;
+    }
+
+    /// <summary>
+    /// Computes a frequency-aware lexical score where repeated query terms in a chunk
+    /// modestly increase confidence.  This improves retrieval for fact lookups where
+    /// key terms may appear multiple times in structured text.
+    /// </summary>
+    private static float LexicalFrequencyScore(HashSet<string> queryTerms, string text)
+    {
+        if (queryTerms.Count == 0)
+        {
+            return 0f;
+        }
+
+        var occurrences = 0;
+        foreach (var term in Tokenize(text))
+        {
+            if (queryTerms.Contains(term))
+            {
+                occurrences++;
+            }
+        }
+
+        // Saturate the score to [0, 1] so frequent repeats help ranking but do not
+        // dominate semantic similarity entirely.
+        var normalizer = Math.Max(1, queryTerms.Count * 2);
+        return Math.Min(1f, occurrences / (float)normalizer);
+    }
+
+    /// <summary>
+    /// Performs a second-stage rerank using Max Marginal Relevance (MMR).
+    /// Keeps highly relevant chunks while discouraging near-duplicates in the final set.
+    /// </summary>
+    private static List<ScoredCandidate> RerankWithDiversity(
+        IReadOnlyList<ScoredCandidate> candidates,
+        int topK,
+        float diversityPenalty)
+    {
+        var selected = new List<ScoredCandidate>(topK);
+        var remaining = candidates.ToList();
+
+        while (selected.Count < topK && remaining.Count > 0)
+        {
+            ScoredCandidate? best = null;
+            var bestScore = float.NegativeInfinity;
+
+            foreach (var candidate in remaining)
+            {
+                var maxSimilarityToSelected = 0f;
+                foreach (var existing in selected)
+                {
+                    maxSimilarityToSelected = Math.Max(maxSimilarityToSelected, CosineSimilarity(candidate.Vector, existing.Vector));
+                }
+
+                var mmrScore = candidate.Score - (diversityPenalty * maxSimilarityToSelected);
+                if (mmrScore > bestScore)
+                {
+                    best = candidate;
+                    bestScore = mmrScore;
+                }
+            }
+
+            if (best is null)
+            {
+                break;
+            }
+
+            selected.Add(best);
+            _ = remaining.Remove(best);
+        }
+
+        return selected;
+    }
+
+    /// <summary>
+    /// Normalizes text into a token phrase used by phrase containment checks.
+    /// Token-based normalization is resilient to punctuation and whitespace differences.
+    /// </summary>
+    private static string NormalizePhrase(string input)
+        => string.Join(' ', Tokenize(input));
+
+    /// <summary>
+    /// Returns <see langword="true"/> when the normalized query phrase appears in the
+    /// normalized chunk text.
+    /// </summary>
+    private static bool HasPhraseMatch(string text, string normalizedQuestionPhrase)
+    {
+        if (string.IsNullOrWhiteSpace(normalizedQuestionPhrase))
+        {
+            return false;
+        }
+
+        var normalizedText = NormalizePhrase(text);
+        return normalizedText.Contains(normalizedQuestionPhrase, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -372,4 +495,6 @@ public static class VectorStoreService
             }
         }
     }
+
+    private sealed record ScoredCandidate(string Source, int ChunkIndex, string Text, float Score, float[] Vector);
 }

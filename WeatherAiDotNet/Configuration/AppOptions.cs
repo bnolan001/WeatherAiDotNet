@@ -174,6 +174,38 @@ public class AppOptions
     public required string OcrCliPath { get; init; }
 
     /// <summary>
+    /// Approximate chunk size in characters used during PDF text splitting.
+    /// Smaller chunks improve precision for fact lookups; larger chunks preserve context.
+    /// Default: 900
+    /// Command-line: --chunk-size
+    /// </summary>
+    public required int ChunkSize { get; init; }
+
+    /// <summary>
+    /// Approximate overlap size in characters between adjacent chunks.
+    /// Overlap preserves continuity so facts at chunk boundaries are less likely to be missed.
+    /// Default: 180
+    /// Command-line: --chunk-overlap
+    /// </summary>
+    public required int ChunkOverlap { get; init; }
+
+    /// <summary>
+    /// Sampling temperature used by the generation model.
+    /// Lower values improve factual consistency for retrieval-grounded Q&amp;A.
+    /// Default: 0.2
+    /// Command-line: --temperature
+    /// </summary>
+    public required float Temperature { get; init; }
+
+    /// <summary>
+    /// Nucleus sampling threshold used by the generation model.
+    /// Slightly lower values reduce off-topic token choices in grounded answers.
+    /// Default: 0.85
+    /// Command-line: --top-p
+    /// </summary>
+    public required float TopP { get; init; }
+
+    /// <summary>
     /// Creates an instance of <see cref="AppOptions"/> by parsing the specified command-line arguments.
     /// </summary>
     /// <param name="args">The command-line arguments to parse.</param>
@@ -203,11 +235,15 @@ public class AppOptions
             PreferGpu = !bool.TryParse(CommandLineParser.GetOption(values, "prefer-gpu", "true"), out var preferGpu) || preferGpu,
             DbPath = CommandLineParser.GetOption(values, "db-path", "rag-vectors.db"),
             CollectionName = CommandLineParser.GetOption(values, "collection", "pdf-rag-poc"),
-            TopK = int.TryParse(CommandLineParser.GetOption(values, "top-k", "6"), out var topK) ? topK : 6,
-            RetrievalPool = int.TryParse(CommandLineParser.GetOption(values, "retrieval-pool", "24"), out var retrievalPool) ? retrievalPool : 24,
+            TopK = int.TryParse(CommandLineParser.GetOption(values, "top-k", "8"), out var topK) ? Math.Max(1, topK) : 8,
+            RetrievalPool = int.TryParse(CommandLineParser.GetOption(values, "retrieval-pool", "48"), out var retrievalPool) ? Math.Max(8, retrievalPool) : 48,
             EmbeddingSize = int.TryParse(CommandLineParser.GetOption(values, "embedding-size", "384"), out var embeddingSize) ? embeddingSize : 384,
             GpuLayers = int.TryParse(CommandLineParser.GetOption(values, "gpu-layers", "999"), out var gpuLayers) ? gpuLayers : 999,
             ContextSize = int.TryParse(CommandLineParser.GetOption(values, "ctx-size", "8192"), out var contextSize) ? contextSize : 4096,
+            ChunkSize = int.TryParse(CommandLineParser.GetOption(values, "chunk-size", "900"), out var chunkSize) ? Math.Max(300, chunkSize) : 900,
+            ChunkOverlap = int.TryParse(CommandLineParser.GetOption(values, "chunk-overlap", "180"), out var chunkOverlap) ? Math.Max(60, chunkOverlap) : 180,
+            Temperature = float.TryParse(CommandLineParser.GetOption(values, "temperature", "0.2"), out var temperature) ? Math.Clamp(temperature, 0f, 2f) : 0.2f,
+            TopP = float.TryParse(CommandLineParser.GetOption(values, "top-p", "0.85"), out var topP) ? Math.Clamp(topP, 0f, 1f) : 0.85f,
 
             // Clamp thread counts to at least 1 to prevent invalid LLamaSharp configurations.
             Threads = int.TryParse(CommandLineParser.GetOption(values, "threads", defaultThreads.ToString()), out var threads) ? Math.Max(1, threads) : defaultThreads,

@@ -93,6 +93,16 @@ try
         appOptions.BatchThreads,
         appOptions.BatchSize,
         appOptions.UBatchSize);
+    Log.Information(
+        "Retrieval tuning: top-k={TopK}, retrieval-pool={RetrievalPool}, chunk-size={ChunkSize}, chunk-overlap={ChunkOverlap}.",
+        appOptions.TopK,
+        appOptions.RetrievalPool,
+        appOptions.ChunkSize,
+        appOptions.ChunkOverlap);
+    Log.Information(
+        "Generation sampling: temperature={Temperature}, top-p={TopP}.",
+        appOptions.Temperature,
+        appOptions.TopP);
     Log.Information("Initializing LLamaSharp...");
 
     // Validate the optional OCR CLI (e.g., tesseract.exe) before the indexing loop.
@@ -199,7 +209,10 @@ try
         appOptions.PdfFolderPath,
         appOptions.IncludeImages,
         PdfContentService.ReadPdfText,
-        static text => PdfContentService.ChunkText(text, chunkSize: 1200, overlap: 200),
+        // Use chunking parameters from configuration so retrieval can be tuned for
+        // fact-heavy PDFs without code changes. Smaller chunks usually improve hit
+        // rate for direct lookup questions.
+        text => PdfContentService.ChunkText(text, chunkSize: appOptions.ChunkSize, overlap: appOptions.ChunkOverlap),
         file => PdfContentService
             .ExtractPdfImageItems(file, appOptions.PdfFolderPath, appOptions.ImagesOutputPath, effectiveOcrCliPath)
             .Select(static item => new RagImageItem(item.IndexText))
@@ -314,6 +327,7 @@ try
             You are a helpful U.S. Air Force weather analyst assistant.
             Answer the question below using ONLY the numbered context snippets provided.
             Write a clear, complete answer in full sentences.
+            Prefer exact terminology from the snippets when it is available.
             After each fact, add the snippet number in brackets, e.g. [1] or [2].
             If the snippets do not contain enough information to answer, say exactly:
             I don't know based on the indexed documents.
@@ -338,7 +352,9 @@ try
             appOptions.Threads,
             appOptions.BatchThreads,
             appOptions.BatchSize,
-            appOptions.UBatchSize);
+            appOptions.UBatchSize,
+            appOptions.Temperature,
+            appOptions.TopP);
 
         // Enforce grounding: if the model returned only whitespace or citation
         // tokens with no surrounding text, replace with the safe fallback.

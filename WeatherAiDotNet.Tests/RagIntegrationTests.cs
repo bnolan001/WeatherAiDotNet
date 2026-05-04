@@ -60,7 +60,11 @@ public class RagIntegrationTests : IAsyncLifetime
             UBatchSize = 256,
             IncludeImages = false,
             ImagesOutputPath = Path.Combine(Path.GetTempPath(), "test-extracted-images"),
-            OcrCliPath = string.Empty
+            OcrCliPath = string.Empty,
+            ChunkSize = 900,
+            ChunkOverlap = 180,
+            Temperature = 0.2f,
+            TopP = 0.85f
         };
 
         // Initialize the vector database
