@@ -417,10 +417,49 @@ try
             || evidenceText.Contains("NO_EVIDENCE", StringComparison.OrdinalIgnoreCase)
             || !hasEvidenceCitations)
         {
-            // If evidence extraction is weak, return the grounded fallback early
-            // instead of asking the model to speculate.
-            Log.Information("Evidence extraction returned insufficient support. Returning grounded fallback response.");
-            answer = "I don't know based on the indexed documents.";
+            // If evidence extraction is weak, fall back to a direct grounded answer
+            // using retrieved context instead of failing the request immediately.
+            Log.Information("Evidence extraction returned insufficient support. Trying direct grounded answer.");
+
+            var directAnswerPrompt = $"""
+                You are a helpful U.S. Air Force weather analyst assistant.
+                Use ONLY the numbered context snippets to answer the question.
+                Rules:
+                - Do not use outside knowledge.
+                - If the context is insufficient, say exactly: I don't know based on the indexed documents.
+                - Include citations like [1] or [2] for each factual statement.
+
+                Context snippets:
+                {context}
+
+                Question: {question}
+
+                Answer:
+                """;
+
+            answer = await LlamaGenerationService.GenerateAnswerAsync(
+                appOptions.ModelPath,
+                directAnswerPrompt,
+                maxTokens: 2048,
+                appOptions.LlamaBackend,
+                appOptions.PreferGpu,
+                appOptions.GpuLayers,
+                appOptions.ContextSize,
+                appOptions.Threads,
+                appOptions.BatchThreads,
+                appOptions.BatchSize,
+                appOptions.UBatchSize,
+                appOptions.Temperature,
+                appOptions.TopP);
+
+            var directTrimmed = answer.Trim();
+            var directHasCitations = Regex.IsMatch(directTrimmed, @"\[\d+\]");
+            if (string.IsNullOrWhiteSpace(directTrimmed)
+                || directTrimmed.Contains("NO_EVIDENCE", StringComparison.OrdinalIgnoreCase)
+                || (!directHasCitations && !directTrimmed.Equals("I don't know based on the indexed documents.", StringComparison.Ordinal)))
+            {
+                answer = "I don't know based on the indexed documents.";
+            }
         }
         else
         {

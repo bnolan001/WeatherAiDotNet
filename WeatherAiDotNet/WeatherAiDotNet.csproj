@@ -28,9 +28,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Content Include="AiModels\bge-base-en-v1.5.onnx">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
     <Content Include="AiModels\nomic-embed-text-v1.5.Q4_K_M.gguf">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
